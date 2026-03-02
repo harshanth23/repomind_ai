@@ -179,7 +179,7 @@ async def _do_push(edit_fn, path: str, repo_name: str = None):
     except Exception as e:
         await edit_fn(f"❌ Push failed: {e}")
 
-async def _do_structure(edit_fn, path: str):
+async def _do_structure(edit_fn, path: str, bot_data: dict = None):
     lines = [f"🗂️ *Structure:* `{_esc(os.path.basename(path))}`\n"]
     count = 0
     for dirpath, dirnames, filenames in os.walk(path):
@@ -197,7 +197,23 @@ async def _do_structure(edit_fn, path: str):
         if count > 25:
             lines.append("_(truncated)_")
             break
-    await edit_fn("\n".join(lines), parse_mode='Markdown')
+
+    kb = None
+    if bot_data is not None:
+        idx = _register_path(bot_data, path)
+        parent = os.path.dirname(path)
+        back_idx = _register_path(bot_data, parent) if parent and parent != path else None
+        rows = [
+            [InlineKeyboardButton("🚀 Push to GitHub", callback_data=f"act:push:{idx}")],
+            [InlineKeyboardButton("🔍 Analyze", callback_data=f"act:analyze:{idx}")],
+        ]
+        if back_idx is not None:
+            rows.append([InlineKeyboardButton("🔙 Back", callback_data=f"nav:{back_idx}")])
+        else:
+            rows.append([InlineKeyboardButton("🔙 Back to Drives", callback_data="browse_drives")])
+        kb = InlineKeyboardMarkup(rows)
+
+    await edit_fn("\n".join(lines), parse_mode='Markdown', reply_markup=kb)
 
 # ─── Drive Browser ────────────────────────────────────────────────────────────
 async def _show_drives(reply_fn, bot_data: dict):
@@ -348,7 +364,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         elif action == "structure":
             await query.edit_message_text(f"🗂️ Loading structure...", parse_mode='Markdown')
-            await _do_structure(query.edit_message_text, path)
+            await _do_structure(query.edit_message_text, path, context.bot_data)
 
     elif data.startswith("pushconfirm:"):
         parts = data.split(":", 2)
