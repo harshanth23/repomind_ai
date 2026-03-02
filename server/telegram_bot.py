@@ -350,7 +350,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    elif data == "mainmenu":
+    if data == "mainmenu":
         await query.edit_message_text(_main_menu_text(), parse_mode='Markdown', reply_markup=_main_menu_kb())
 
     elif data == "browse_drives":
