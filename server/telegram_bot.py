@@ -51,6 +51,24 @@ def call_api(method: str, endpoint: str, payload: dict = None) -> dict:
     resp.raise_for_status()
     return resp.json()
 
+# ─── Shared UI Helpers ──────────────────────────────────────────────────────
+HOME_BTN = InlineKeyboardButton("🏠 Main Menu", callback_data="mainmenu")
+
+def _main_menu_text():
+    return (
+        "👋 *RepoMind AI – Main Menu*\n\n"
+        "• 📂 Browse Folders – navigate your drive\n"
+        "• 📦 GitHub Repos – view & get insights\n"
+        "• 🗃️ Analyzed Projects – your history"
+    )
+
+def _main_menu_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📂 Browse Folders", callback_data="browse_drives")],
+        [InlineKeyboardButton("📦 GitHub Repos", callback_data="cmd:repos")],
+        [InlineKeyboardButton("🗃️ Analyzed Projects", callback_data="cmd:projects")],
+    ])
+
 # ─── Folder Navigation Helpers ────────────────────────────────────────────────
 FOLDER_PAGE_SIZE = 8
 EMOJI_NUM = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
@@ -104,6 +122,7 @@ def _build_nav_keyboard(bot_data: dict, path: str, subfolders: list, page: int =
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"nav:{_register_path(bot_data, parent)}")])
     # Select current
     buttons.append([InlineKeyboardButton("✅ Select this folder", callback_data=f"select:{pidx}")])
+    buttons.append([HOME_BTN])
     text = "\n".join(lines) + "\n\n_Select a subfolder or choose this folder._"
     return text, InlineKeyboardMarkup(buttons)
 
@@ -122,6 +141,7 @@ def _build_action_keyboard(bot_data: dict, path: str):
         buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"nav:{back_target}")])
     else:
         buttons.append([InlineKeyboardButton("🔙 Back to Drives", callback_data="browse_drives")])
+    buttons.append([HOME_BTN])
     return text, InlineKeyboardMarkup(buttons)
 
 # ─── Action Executors ─────────────────────────────────────────────────────────
@@ -161,6 +181,7 @@ async def _do_analyze(edit_fn, path: str, bot_data: dict = None):
                 rows.append([InlineKeyboardButton("🔙 Back", callback_data=f"nav:{back_idx}")])
             else:
                 rows.append([InlineKeyboardButton("🔙 Back to Drives", callback_data="browse_drives")])
+            rows.append([HOME_BTN])
             kb = InlineKeyboardMarkup(rows)
 
         await edit_fn(text, parse_mode='Markdown', reply_markup=kb)
@@ -177,9 +198,11 @@ async def _do_push(edit_fn, path: str, repo_name: str = None, use_existing: bool
             'use_existing': use_existing
         })
         url = result.get('url', '')
-        await edit_fn(f"✅ Pushed successfully!\n🔗 {url}", parse_mode=None)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Open on GitHub", url=url)], [HOME_BTN]])
+        await edit_fn(f"✅ *Pushed successfully!*\n🔗 {url}", parse_mode='Markdown', reply_markup=kb)
     except Exception as e:
-        await edit_fn(f"❌ Push failed: {e}")
+        kb = InlineKeyboardMarkup([[HOME_BTN]])
+        await edit_fn(f"❌ Push failed: {e}", reply_markup=kb)
 
 async def _do_structure(edit_fn, path: str, bot_data: dict = None):
     lines = [f"🗂️ *Structure:* `{_esc(os.path.basename(path))}`\n"]
@@ -213,6 +236,7 @@ async def _do_structure(edit_fn, path: str, bot_data: dict = None):
             rows.append([InlineKeyboardButton("🔙 Back", callback_data=f"nav:{back_idx}")])
         else:
             rows.append([InlineKeyboardButton("🔙 Back to Drives", callback_data="browse_drives")])
+        rows.append([HOME_BTN])
         kb = InlineKeyboardMarkup(rows)
 
     await edit_fn("\n".join(lines), parse_mode='Markdown', reply_markup=kb)
@@ -226,6 +250,13 @@ async def _show_drives(reply_fn, bot_data: dict):
 
 
 # ─── Command Handlers ─────────────────────────────────────────────────────────
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel any ongoing flow and return to main menu."""
+    context.user_data.clear()
+    await update.message.reply_text(
+        _main_menu_text(), parse_mode='Markdown', reply_markup=_main_menu_kb()
+    )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📂 Browse Folders", callback_data="browse_drives")],
@@ -319,7 +350,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    if data == "browse_drives":
+    elif data == "mainmenu":
+        await query.edit_message_text(_main_menu_text(), parse_mode='Markdown', reply_markup=_main_menu_kb())
+
+    elif data == "browse_drives":
         await _show_drives(query.edit_message_text, context.bot_data)
 
     elif data == "cmd:repos":
@@ -355,10 +389,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔗 Open on GitHub", url=r.get('html_url', ''))],
                 [InlineKeyboardButton("🔙 Back to Repos", callback_data="cmd:repos")],
+                [HOME_BTN],
             ])
             await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
         except Exception as e:
-            await query.edit_message_text(f"❌ Failed to load repo info: {e}")
+            await query.edit_message_text(f"❌ Failed to load repo info: {e}",
+                reply_markup=InlineKeyboardMarkup([[HOME_BTN]]))
 
     elif data == "cmd:projects":
         await projects_cmd(update, context)
@@ -423,6 +459,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(f"✅ Use '{repo_name}'", callback_data=f"pushconfirm:{pidx}:{repo_name}:new")],
             [InlineKeyboardButton("✏️ Type a custom name", callback_data=f"pushtype:{pidx}")],
             [InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}")],
+            [HOME_BTN],
         ])
         await query.edit_message_text(
             f"🚀 *Create New Repo*\n\n📁 `{_esc(path)}`\n📝 Suggested name: *{_esc(repo_name)}*",
@@ -435,7 +472,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Store state so text_handler knows what to do next
         context.user_data['awaiting_repo_name'] = {'pidx': pidx, 'path': path}
         await query.edit_message_text(
-            f"✏️ *Type your repo name:*\n\n📁 `{_esc(path)}`\n\nSend the repo name as a message (letters, numbers and hyphens only).",
+            f"✏️ *Type your repo name:*\n\n📁 `{_esc(path)}`\n\nSend the repo name as a message.\nType /cancel to go back to Main Menu.",
             parse_mode='Markdown'
         )
 
@@ -457,12 +494,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     callback_data=f"pushconfirm:{pidx}:{rname}:exist"
                 )])
             buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}")])
+            buttons.append([HOME_BTN])
             await query.edit_message_text(
                 f"📂 *Select existing repo to push to:*",
                 parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons)
             )
         except Exception as e:
-            await query.edit_message_text(f"❌ Failed to load repos: {e}")
+            await query.edit_message_text(f"❌ Failed to load repos: {e}",
+                reply_markup=InlineKeyboardMarkup([[HOME_BTN]]))
 
     elif data.startswith("pushconfirm:"):
         parts = data.split(":", 3)
@@ -479,6 +518,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Awaiting custom repo name input ──────────────────────────────────────
     pending = context.user_data.get('awaiting_repo_name')
     if pending:
+        # Allow cancel even while in this state
+        if text.lower() in ('/cancel', 'cancel'):
+            context.user_data.clear()
+            await update.message.reply_text(_main_menu_text(), parse_mode='Markdown', reply_markup=_main_menu_kb())
+            return
         del context.user_data['awaiting_repo_name']
         # Sanitise: replace spaces/underscores with hyphens, strip bad chars
         repo_name = re.sub(r'[^a-zA-Z0-9._-]', '-', text.strip()).strip('-') or 'my-repo'
@@ -488,6 +532,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(f"✅ Confirm: create '{repo_name}'", callback_data=f"pushconfirm:{pidx}:{repo_name}:new")],
             [InlineKeyboardButton("✏️ Change name", callback_data=f"pushtype:{pidx}")],
             [InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}")],
+            [HOME_BTN],
         ])
         await update.message.reply_text(
             f"🚀 *Create New Repo*\n\n📁 `{_esc(path)}`\nRepo: *{_esc(repo_name)}*\n\nA new public repo will be created on GitHub.",
@@ -560,6 +605,7 @@ def run_bot():
         raise ValueError("TELEGRAM_BOT_TOKEN not set in .env")
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler('start', start))
+    app.add_handler(CommandHandler('cancel', cancel_cmd))
     app.add_handler(CommandHandler('help', help_cmd))
     app.add_handler(CommandHandler('browse', browse_cmd))
     app.add_handler(CommandHandler('analyze', analyze_cmd))
