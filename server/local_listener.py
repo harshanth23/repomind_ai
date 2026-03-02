@@ -22,6 +22,7 @@ db = DatabaseManager()
 # --- Request Models ---
 class AnalyzeRequest(BaseModel):
     project_path: str
+    exclude_paths: list = []
 
 class PushRequest(BaseModel):
     project_path: str
@@ -45,10 +46,10 @@ def analyze(req: AnalyzeRequest):
     if not os.path.isdir(req.project_path):
         raise HTTPException(status_code=400, detail=f"Path not found: {req.project_path}")
 
-    scanner = ProjectScanner(req.project_path)
+    scanner = ProjectScanner(req.project_path, exclude_paths=req.exclude_paths)
     scan_result = scanner.scan()
 
-    analyzer = ProjectAnalyzer(req.project_path)
+    analyzer = ProjectAnalyzer(req.project_path, exclude_paths=req.exclude_paths)
     analysis_result = analyzer.analyze()
 
     prefs = db.get_preferences()

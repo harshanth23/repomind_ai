@@ -13,8 +13,9 @@ MODEL_EXTENSIONS = ['.pt', '.pth', '.h5', '.pb', '.ckpt', '.pkl', '.onnx']
 
 
 class ProjectAnalyzer:
-    def __init__(self, project_path: str):
+    def __init__(self, project_path: str, exclude_paths: list = None):
         self.project_path = project_path
+        self.exclude_paths = set(os.path.normpath(p) for p in (exclude_paths or []))
 
     def analyze(self) -> dict:
         detected_frameworks = []
@@ -25,7 +26,13 @@ class ProjectAnalyzer:
         git_initialized = os.path.isdir(os.path.join(self.project_path, '.git'))
 
         for dirpath, dirnames, filenames in os.walk(self.project_path):
-            dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+            # Skip excluded folders entirely
+            if os.path.normpath(dirpath) in self.exclude_paths:
+                dirnames.clear()
+                continue
+            dirnames[:] = [d for d in dirnames
+                if os.path.normpath(os.path.join(dirpath, d)) not in self.exclude_paths
+                and not d.startswith('.')]
 
             for filename in filenames:
                 filepath = os.path.join(dirpath, filename)

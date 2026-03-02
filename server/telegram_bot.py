@@ -145,9 +145,12 @@ def _build_action_keyboard(bot_data: dict, path: str):
     return text, InlineKeyboardMarkup(buttons)
 
 # ─── Action Executors ─────────────────────────────────────────────────────────
-async def _do_analyze(edit_fn, path: str, bot_data: dict = None):
+async def _do_analyze(edit_fn, path: str, bot_data: dict = None, exclude_paths: list = None):
     try:
-        result = call_api('POST', '/analyze', {'project_path': path})
+        payload = {'project_path': path}
+        if exclude_paths:
+            payload['exclude_paths'] = exclude_paths
+        result = call_api('POST', '/analyze', payload)
         scan, analysis, decisions = result['scan'], result['analysis'], result['decisions']
         text = (
             f"✅ *Analysis Complete*\n\n"
@@ -244,38 +247,47 @@ async def _do_structure(edit_fn, path: str, bot_data: dict = None):
 
 # ─── Exclusion Picker Helper ─────────────────────────────────────────────────
 
-def _build_excl_keyboard(bot_data: dict, user_data: dict):
-    state = user_data.get('push_excl', {})
-    path = state.get('path', '')
-    repo_name = state.get('repo_name', '')
-    pidx = state.get('pidx', 0)
-    excluded: set = set(state.get('excluded', []))
-
-    # Gather all direct subfolders to show
+def _get_subfolders_for_excl(path: str) -> list:
     try:
-        subfolders = sorted([os.path.join(path, n) for n in os.listdir(path)
+        return sorted([os.path.join(path, n) for n in os.listdir(path)
             if os.path.isdir(os.path.join(path, n)) and not n.startswith('.') and not n.startswith('$')])
     except Exception:
-        subfolders = []
+        return []
 
+def _build_excl_keyboard(bot_data: dict, user_data: dict, mode: str = 'push'):
+    """mode = 'push' or 'analyze'"""
+    key = 'push_excl' if mode == 'push' else 'analyze_excl'
+    toggle_cb = 'excltoggle' if mode == 'push' else 'aexcltoggle'
+    go_cb = 'pushgo' if mode == 'push' else 'analyzego'
+    go_icon = '🚀 Push Now' if mode == 'push' else '🔍 Analyze Now'
+
+    state = user_data.get(key, {})
+    path = state.get('path', '')
+    pidx = state.get('pidx', 0)
+    label = state.get('repo_name', os.path.basename(path)) if mode == 'push' else os.path.basename(path)
+    excluded: set = set(state.get('excluded', []))
+
+    subfolders = _get_subfolders_for_excl(path)
     buttons = []
     for fp in subfolders[:15]:
         name = os.path.basename(fp)
         fidx = _register_path(bot_data, fp)
         icon = "🚫" if fp in excluded else "✅"
-        buttons.append([InlineKeyboardButton(f"{icon} {name}", callback_data=f"excltoggle:{fidx}")])
+        buttons.append([InlineKeyboardButton(f"{icon} {name}", callback_data=f"{toggle_cb}:{fidx}")])
 
     excl_names = [os.path.basename(p) for p in excluded]
     excl_str = ', '.join(excl_names) if excl_names else 'None'
     n_excl = len(excluded)
-    label = f"🚀 Push Now — {n_excl} folder(s) excluded" if n_excl else "🚀 Push Now — all folders included"
-    buttons.append([InlineKeyboardButton(label, callback_data="pushgo")])
-    buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}"), HOME_BTN])
+    go_label = f"{go_icon} — {n_excl} folder(s) excluded" if n_excl else f"{go_icon} — all folders included"
+    buttons.append([InlineKeyboardButton(go_label, callback_data=go_cb)])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"act:{'push' if mode=='push' else 'analyze'}:{pidx}"), HOME_BTN])
 
+    action_word = "push" if mode == 'push' else "analyse"
     text = (
-        f"📦 *Choose folders to EXCLUDE from push:*\n\n"
-        f"📁 `{_esc(os.path.basename(path))}`  →  *{_esc(repo_name)}*\n\n"
-        f"✅ = will be pushed\n❌⃣ = excluded (tap to toggle)\n\n"
+        f"📦 *Choose folders to EXCLUDE from {action_word}:*\n\n"
+        f"📁 `{_esc(os.path.basename(path))}`" +
+        (f"  →  *{_esc(label)}*" if mode == 'push' else "") + "\n\n"
+        f"✅ = included │ 🚫 = excluded \_(tap to toggle)\n\n"
         f"*Excluded:* {_esc(excl_str)}"
     )
     return text, InlineKeyboardMarkup(buttons)
@@ -469,8 +481,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pidx = int(idx_s)
 
         if action == "analyze":
-            await query.edit_message_text(f"🔍 Analyzing `{path}`...", parse_mode='Markdown')
-            await _do_analyze(query.edit_message_text, path, context.bot_data)
+            # Show exclusion picker first
+            context.user_data['analyze_excl'] = {'path': path, 'pidx': pidx, 'excluded': []}
+            text, kb = _build_excl_keyboard(context.bot_data, context.user_data, mode='analyze')
+            await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
 
         elif action == "push":
             repo_name = os.path.basename(path).replace(' ', '-').lower()
@@ -553,7 +567,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'path': path, 'repo_name': repo_name,
             'use_existing': use_existing, 'pidx': pidx, 'excluded': []
         }
-        text, kb = _build_excl_keyboard(context.bot_data, context.user_data)
+        text, kb = _build_excl_keyboard(context.bot_data, context.user_data, mode='push')
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
 
     elif data.startswith("excltoggle:"):
@@ -567,8 +581,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             excluded.append(fp)
         state['excluded'] = excluded
         context.user_data['push_excl'] = state
-        text, kb = _build_excl_keyboard(context.bot_data, context.user_data)
+        text, kb = _build_excl_keyboard(context.bot_data, context.user_data, mode='push')
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+
+    elif data.startswith("aexcltoggle:"):
+        fidx = int(data.split(":")[1])
+        fp = _get_path(context.bot_data, fidx)
+        state = context.user_data.get('analyze_excl', {})
+        excluded: list = state.get('excluded', [])
+        if fp in excluded:
+            excluded.remove(fp)
+        else:
+            excluded.append(fp)
+        state['excluded'] = excluded
+        context.user_data['analyze_excl'] = state
+        text, kb = _build_excl_keyboard(context.bot_data, context.user_data, mode='analyze')
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+
+    elif data == "analyzego":
+        state = context.user_data.pop('analyze_excl', {})
+        path = state.get('path', '')
+        excluded = state.get('excluded', [])
+        n = len(excluded)
+        await query.edit_message_text(
+            f"🔍 Analyzing" + (f" (excluding {n} folder{'s' if n!=1 else ''})" if n else "") + "...",
+            parse_mode='Markdown'
+        )
+        await _do_analyze(query.edit_message_text, path, context.bot_data,
+                          exclude_paths=excluded if excluded else None)
 
     elif data == "pushgo":
         state = context.user_data.get('push_excl', {})

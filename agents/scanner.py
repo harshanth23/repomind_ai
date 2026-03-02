@@ -7,8 +7,9 @@ LARGE_FOLDER_THRESHOLD = 1 * 1024 * 1024 * 1024  # 1 GB
 
 
 class ProjectScanner:
-    def __init__(self, root_path: str):
+    def __init__(self, root_path: str, exclude_paths: list = None):
         self.root_path = root_path
+        self.exclude_paths = set(os.path.normpath(p) for p in (exclude_paths or []))
         self.result = {}
 
     def scan(self) -> dict:
@@ -25,7 +26,13 @@ class ProjectScanner:
             pass  # silently skip inaccessible folders
 
         for dirpath, dirnames, filenames in os.walk(self.root_path, onerror=onerror, followlinks=False):
-            dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+            # Skip excluded folders entirely
+            if os.path.normpath(dirpath) in self.exclude_paths:
+                dirnames.clear()
+                continue
+            dirnames[:] = [d for d in dirnames
+                if os.path.normpath(os.path.join(dirpath, d)) not in self.exclude_paths
+                and not d.startswith('.')]
             folder_name = os.path.basename(dirpath).lower()
 
             # Detect dataset folders by name only — no size call here
