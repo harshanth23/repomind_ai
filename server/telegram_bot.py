@@ -125,7 +125,7 @@ def _build_action_keyboard(bot_data: dict, path: str):
     return text, InlineKeyboardMarkup(buttons)
 
 # ─── Action Executors ─────────────────────────────────────────────────────────
-async def _do_analyze(edit_fn, path: str):
+async def _do_analyze(edit_fn, path: str, bot_data: dict = None):
     try:
         result = call_api('POST', '/analyze', {'project_path': path})
         scan, analysis, decisions = result['scan'], result['analysis'], result['decisions']
@@ -145,7 +145,25 @@ async def _do_analyze(edit_fn, path: str):
         )
         if decisions['warn_large_files']:
             text += f"\n⚠️ {len(decisions['warn_large_files'])} large file(s) detected!\n"
-        await edit_fn(text, parse_mode='Markdown')
+
+        # Build post-analysis action buttons
+        kb = None
+        if bot_data is not None:
+            idx = _register_path(bot_data, path)
+            repo_name = os.path.basename(path).replace(' ', '-').lower()
+            parent = os.path.dirname(path)
+            back_idx = _register_path(bot_data, parent) if parent and parent != path else None
+            rows = [
+                [InlineKeyboardButton("🚀 Push to GitHub", callback_data=f"act:push:{idx}")],
+                [InlineKeyboardButton("🗂️ Show Structure", callback_data=f"act:structure:{idx}")],
+            ]
+            if back_idx is not None:
+                rows.append([InlineKeyboardButton("🔙 Back", callback_data=f"nav:{back_idx}")])
+            else:
+                rows.append([InlineKeyboardButton("🔙 Back to Drives", callback_data="browse_drives")])
+            kb = InlineKeyboardMarkup(rows)
+
+        await edit_fn(text, parse_mode='Markdown', reply_markup=kb)
     except Exception as e:
         await edit_fn(f"❌ Error: {e}")
 
@@ -233,7 +251,7 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /analyze <project_path>")
         return
     msg = await update.message.reply_text(f"🔍 Analyzing...", parse_mode='Markdown')
-    await _do_analyze(msg.edit_text, ' '.join(context.args))
+    await _do_analyze(msg.edit_text, ' '.join(context.args), context.bot_data)
 
 async def push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
@@ -315,7 +333,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action == "analyze":
             await query.edit_message_text(f"🔍 Analyzing `{path}`...", parse_mode='Markdown')
-            await _do_analyze(query.edit_message_text, path)
+            await _do_analyze(query.edit_message_text, path, context.bot_data)
 
         elif action == "push":
             repo_name = os.path.basename(path).replace(' ', '-').lower()
@@ -368,7 +386,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action == 'analyze' and params.get('project_path'):
             await thinking.edit_text(f"🔍 Analyzing...", parse_mode='Markdown')
-            await _do_analyze(thinking.edit_text, params['project_path'])
+            await _do_analyze(thinking.edit_text, params['project_path'], context.bot_data)
             return
         elif action == 'push' and params.get('project_path'):
             path = params['project_path']
