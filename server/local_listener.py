@@ -1,4 +1,6 @@
+import ast
 import os
+import subprocess
 import sys
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
@@ -17,6 +19,76 @@ from database.db import DatabaseManager
 
 app = FastAPI(title="RepoMind AI Local Server")
 db = DatabaseManager()
+
+
+# --- Helpers ---
+
+def _generate_requirements(project_path: str) -> str:
+    """
+    Generate requirements.txt for a project if it doesn't already exist.
+    Tries pipreqs first; falls back to a basic AST import scan.
+    Returns 'pipreqs', 'scan', or 'exists'.
+    """
+    req_path = os.path.join(project_path, 'requirements.txt')
+    if os.path.exists(req_path):
+        return 'exists'
+
+    # --- Attempt 1: pipreqs ---
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'pipreqs.pipreqs', project_path,
+             '--force', '--savepath', req_path],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0 and os.path.exists(req_path):
+            return 'pipreqs'
+    except Exception:
+        pass
+
+    # --- Attempt 2: basic AST import scan ---
+    stdlib = sys.stdlib_module_names if hasattr(sys, 'stdlib_module_names') else set()
+    # common stdlib extras for older Python
+    stdlib = stdlib | {
+        'os', 'sys', 're', 'io', 'abc', 'ast', 'csv', 'copy', 'json',
+        'math', 'time', 'uuid', 'enum', 'pathlib', 'typing', 'string',
+        'logging', 'hashlib', 'datetime', 'tempfile', 'argparse',
+        'threading', 'functools', 'itertools', 'collections', 'subprocess',
+        'traceback', 'warnings', 'unittest', 'contextlib', 'dataclasses',
+        'pickle', 'struct', 'socket', 'shutil', 'glob', 'fnmatch',
+        '__future__', 'builtins', 'types', 'inspect', 'operator',
+    }
+    found = set()
+    for dirpath, dirnames, filenames in os.walk(project_path):
+        # skip hidden / venv dirs
+        dirnames[:] = [d for d in dirnames if not d.startswith('.') and d not in
+                       ('venv', '.venv', 'env', '__pycache__', 'node_modules', '.git')]
+        for fname in filenames:
+            if not fname.endswith('.py'):
+                continue
+            fpath = os.path.join(dirpath, fname)
+            try:
+                with open(fpath, 'r', encoding='utf-8', errors='ignore') as fh:
+                    tree = ast.parse(fh.read(), filename=fpath)
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            top = alias.name.split('.')[0]
+                            if top and top not in stdlib:
+                                found.add(top)
+                    elif isinstance(node, ast.ImportFrom):
+                        if node.module:
+                            top = node.module.split('.')[0]
+                            if top and top not in stdlib:
+                                found.add(top)
+            except Exception:
+                pass
+
+    if found:
+        with open(req_path, 'w') as fh:
+            for pkg in sorted(found):
+                fh.write(pkg + '\n')
+        return 'scan'
+    return 'scan'
 
 
 # --- Request Models ---
@@ -105,6 +177,9 @@ def push(req: PushRequest):
     readme_gen = ReadmeGenerator(project_info)
     readme_path = os.path.join(req.project_path, 'README.md')
     readme_gen.generate(output_path=readme_path)
+
+    # Auto-generate requirements.txt if missing
+    _generate_requirements(req.project_path)
 
     # Push
     try:
