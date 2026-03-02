@@ -370,18 +370,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _do_structure(query.edit_message_text, path, context.bot_data)
 
     elif data.startswith("pushnew:"):
-        # pushnew:{path_idx}:{repo_name}
+        # pushnew:{path_idx}:{suggested_repo_name}
         parts = data.split(":", 2)
-        path = _get_path(context.bot_data, int(parts[1]))
-        repo_name = parts[2]
         pidx = int(parts[1])
+        path = _get_path(context.bot_data, pidx)
+        repo_name = parts[2]
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"✅ Confirm: create '{repo_name}'", callback_data=f"pushconfirm:{pidx}:{repo_name}:new")],
+            [InlineKeyboardButton(f"✅ Use '{repo_name}'", callback_data=f"pushconfirm:{pidx}:{repo_name}:new")],
+            [InlineKeyboardButton("✏️ Type a custom name", callback_data=f"pushtype:{pidx}")],
             [InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}")],
         ])
         await query.edit_message_text(
-            f"🚀 *New Repo*\n\n📁 `{_esc(path)}`\nRepo: *{_esc(repo_name)}*\n\nA new public repo will be created on GitHub.",
+            f"🚀 *Create New Repo*\n\n📁 `{_esc(path)}`\n📝 Suggested name: *{_esc(repo_name)}*",
             parse_mode='Markdown', reply_markup=kb
+        )
+
+    elif data.startswith("pushtype:"):
+        pidx = int(data.split(":")[1])
+        path = _get_path(context.bot_data, pidx)
+        # Store state so text_handler knows what to do next
+        context.user_data['awaiting_repo_name'] = {'pidx': pidx, 'path': path}
+        await query.edit_message_text(
+            f"✏️ *Type your repo name:*\n\n📁 `{_esc(path)}`\n\nSend the repo name as a message (letters, numbers and hyphens only).",
+            parse_mode='Markdown'
         )
 
     elif data.startswith("pushexist:"):
@@ -419,7 +430,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Natural Language Handler ─────────────────────────────────────────────────
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    text = update.message.text.strip()
+
+    # ── Awaiting custom repo name input ──────────────────────────────────────
+    pending = context.user_data.get('awaiting_repo_name')
+    if pending:
+        del context.user_data['awaiting_repo_name']
+        # Sanitise: replace spaces/underscores with hyphens, strip bad chars
+        repo_name = re.sub(r'[^a-zA-Z0-9._-]', '-', text.strip()).strip('-') or 'my-repo'
+        pidx = pending['pidx']
+        path = pending['path']
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ Confirm: create '{repo_name}'", callback_data=f"pushconfirm:{pidx}:{repo_name}:new")],
+            [InlineKeyboardButton("✏️ Change name", callback_data=f"pushtype:{pidx}")],
+            [InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}")],
+        ])
+        await update.message.reply_text(
+            f"🚀 *Create New Repo*\n\n📁 `{_esc(path)}`\nRepo: *{_esc(repo_name)}*\n\nA new public repo will be created on GitHub.",
+            parse_mode='Markdown', reply_markup=kb
+        )
+        return
 
     # Direct drive detection → start folder navigation
     drive = _detect_drive(text)
