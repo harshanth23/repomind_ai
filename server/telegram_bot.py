@@ -1,5 +1,7 @@
 import os
 import sys
+import re
+import string
 import requests
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,231 +20,375 @@ from database.db import DatabaseManager
 SERVER_URL = f"http://localhost:{os.getenv('SERVER_PORT', 8000)}"
 db = DatabaseManager()
 
+# ─── Path Registry ────────────────────────────────────────────────────────────
+# Telegram callback_data max = 64 bytes, so we store paths in bot_data by index
+_path_counter = 0
 
-# --- Helpers ---
+def _register_path(bot_data: dict, path: str) -> int:
+    global _path_counter
+    registry = bot_data.setdefault('paths', {})
+    for idx, p in registry.items():
+        if p == path:
+            return idx
+    _path_counter += 1
+    registry[_path_counter] = path
+    return _path_counter
+
+def _get_path(bot_data: dict, idx: int) -> str:
+    return bot_data.get('paths', {}).get(idx, '')
+
+# ─── API Helper ───────────────────────────────────────────────────────────────
 def call_api(method: str, endpoint: str, payload: dict = None) -> dict:
     url = f"{SERVER_URL}{endpoint}"
-    if method == 'GET':
-        resp = requests.get(url)
-    else:
-        resp = requests.post(url, json=payload)
+    resp = requests.get(url) if method == 'GET' else requests.post(url, json=payload)
     resp.raise_for_status()
     return resp.json()
 
+# ─── Folder Navigation Helpers ────────────────────────────────────────────────
+FOLDER_PAGE_SIZE = 8
+EMOJI_NUM = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
 
-def build_project_keyboard(projects: list) -> InlineKeyboardMarkup:
+def _get_subfolders(path: str) -> list:
+    try:
+        return sorted([
+            os.path.join(path, n) for n in os.listdir(path)
+            if not n.startswith('.') and not n.startswith('$')
+            and os.path.isdir(os.path.join(path, n))
+        ])
+    except PermissionError:
+        return []
+
+def _detect_drive(text: str) -> str | None:
+    t = text.lower()
+    patterns = [
+        r'drive\s+([a-z])', r'go\s+to\s+(?:drive\s+)?([a-z])',
+        r'([a-z])\s+drive', r'\b([a-z]):\b', r'\bopen\s+([a-z])\b',
+    ]
+    for pat in patterns:
+        m = re.search(pat, t)
+        if m:
+            return m.group(1).upper() + ':\\'
+    return None
+
+def _build_nav_keyboard(bot_data: dict, path: str, subfolders: list, page: int = 0):
+    start = page * FOLDER_PAGE_SIZE
+    page_folders = subfolders[start:start + FOLDER_PAGE_SIZE]
+    folder_name = os.path.basename(path) or path
+    lines = [f"📂 *{folder_name}*\n"]
     buttons = []
-    for p in projects[:10]:
-        buttons.append([InlineKeyboardButton(p['name'], callback_data=f"analyze:{p['path']}")])
-    return InlineKeyboardMarkup(buttons)
+    for i, fp in enumerate(page_folders):
+        name = os.path.basename(fp)
+        em = EMOJI_NUM[i] if i < len(EMOJI_NUM) else f"{start+i+1}."
+        lines.append(f"{em} {name}")
+        idx = _register_path(bot_data, fp)
+        buttons.append([InlineKeyboardButton(f"{em} {name}", callback_data=f"nav:{idx}")])
+    # Pagination
+    prow = []
+    pidx = _register_path(bot_data, path)
+    if page > 0:
+        prow.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"navp:{pidx}:{page-1}"))
+    if start + FOLDER_PAGE_SIZE < len(subfolders):
+        prow.append(InlineKeyboardButton("➡️ Next", callback_data=f"navp:{pidx}:{page+1}"))
+    if prow:
+        buttons.append(prow)
+    # Back
+    parent = os.path.dirname(path)
+    if parent and parent != path:
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"nav:{_register_path(bot_data, parent)}")])
+    # Select current
+    buttons.append([InlineKeyboardButton("✅ Select this folder", callback_data=f"select:{pidx}")])
+    text = "\n".join(lines) + "\n\n_Select a subfolder or choose this folder._"
+    return text, InlineKeyboardMarkup(buttons)
+
+def _build_action_keyboard(bot_data: dict, path: str):
+    idx = _register_path(bot_data, path)
+    name = os.path.basename(path) or path
+    text = f"📁 *Selected:* `{path}`\n\nWhat do you want to do with *{name}*?"
+    buttons = [
+        [InlineKeyboardButton("🔍 1️⃣  Analyze", callback_data=f"act:analyze:{idx}")],
+        [InlineKeyboardButton("🚀 2️⃣  Push to GitHub", callback_data=f"act:push:{idx}")],
+        [InlineKeyboardButton("🗂️ 3️⃣  Show Structure", callback_data=f"act:structure:{idx}")],
+        [InlineKeyboardButton("🔙 Back", callback_data=f"nav:{idx}")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+# ─── Action Executors ─────────────────────────────────────────────────────────
+async def _do_analyze(edit_fn, path: str):
+    try:
+        result = call_api('POST', '/analyze', {'project_path': path})
+        scan, analysis, decisions = result['scan'], result['analysis'], result['decisions']
+        text = (
+            f"✅ *Analysis Complete*\n\n"
+            f"📁 *Project:* `{result['project_name']}`\n"
+            f"💾 *Size:* {scan['total_size_hr']}\n"
+            f"📄 *Files:* {scan['total_files']}\n"
+            f"🐍 *Python Files:* {analysis['total_python_files']}\n"
+            f"📝 *Lines of Code:* {analysis['total_lines_of_code']}\n"
+            f"🧠 *Frameworks:* {', '.join(analysis['detected_frameworks']) or 'None'}\n"
+            f"📋 *requirements.txt:* {'✅' if analysis['requirements_found'] else '❌'}\n"
+            f"🔧 *Git:* {'✅' if analysis['git_initialized'] else '❌'}\n"
+            f"🤖 *Model Files:* {len(analysis['model_files'])}\n"
+            f"🗂️ *Dataset Folders:* {len(scan['dataset_folders'])}\n"
+            f"⚠️ *Large Files:* {len(scan['large_files'])}\n"
+        )
+        if decisions['warn_large_files']:
+            text += f"\n⚠️ {len(decisions['warn_large_files'])} large file(s) detected!\n"
+        await edit_fn(text, parse_mode='Markdown')
+    except Exception as e:
+        await edit_fn(f"❌ Error: {e}")
+
+async def _do_push(edit_fn, path: str, repo_name: str = None):
+    if not repo_name:
+        repo_name = os.path.basename(path).replace(' ', '-').lower()
+    try:
+        result = call_api('POST', '/push', {
+            'project_path': path, 'repo_name': repo_name,
+            'commit_message': 'Commit via RepoMind AI'
+        })
+        await edit_fn(f"✅ *Pushed!*\n🔗 {result.get('url', '')}", parse_mode='Markdown')
+    except Exception as e:
+        await edit_fn(f"❌ Push failed: {e}")
+
+async def _do_structure(edit_fn, path: str):
+    lines = [f"🗂️ *Structure:* `{os.path.basename(path)}`\n"]
+    count = 0
+    for dirpath, dirnames, filenames in os.walk(path):
+        dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+        level = dirpath.replace(path, '').count(os.sep)
+        if level > 2:
+            continue
+        indent = '  ' * level
+        lines.append(f"{indent}📁 `{os.path.basename(dirpath)}/`")
+        for f in filenames[:4]:
+            lines.append(f"{indent}  📄 `{f}`")
+        if len(filenames) > 4:
+            lines.append(f"{indent}  _+{len(filenames)-4} more_")
+        count += 1
+        if count > 25:
+            lines.append("_(truncated)_")
+            break
+    await edit_fn("\n".join(lines), parse_mode='Markdown')
+
+# ─── Drive Browser ────────────────────────────────────────────────────────────
+async def _show_drives(reply_fn, bot_data: dict):
+    drives = [f"{l}:\\" for l in string.ascii_uppercase if os.path.exists(f"{l}:\\")]
+    buttons = [[InlineKeyboardButton(f"💾 Drive {d[0]}:", callback_data=f"nav:{_register_path(bot_data, d)}")] for d in drives]
+    await reply_fn("💾 *Available Drives:*\n\nSelect a drive to browse:",
+                   parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
 
-# --- Command Handlers ---
+# ─── Command Handlers ─────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📂 Browse Folders", callback_data="browse_drives")],
+        [InlineKeyboardButton("📦 GitHub Repos", callback_data="cmd:repos")],
+        [InlineKeyboardButton("🗃️ Analyzed Projects", callback_data="cmd:projects")],
+    ])
     await update.message.reply_text(
         "👋 Welcome to *RepoMind AI*!\n\n"
-        "Commands:\n"
-        "/analyze `<path>` – Analyze a project\n"
-        "/push `<path> <repo_name>` – Push project to GitHub\n"
-        "/repos – List your GitHub repos\n"
-        "/projects – List analyzed local projects\n"
-        "/help – Show this message",
-        parse_mode='Markdown'
+        "I can analyze your local projects and push them to GitHub.\n\n"
+        "• Tap *Browse Folders* to navigate your drive step by step\n"
+        "• Or type: `Go to Drive D`\n"
+        "• Or type `/help` for all commands",
+        parse_mode='Markdown', reply_markup=keyboard
     )
 
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📂 Browse Folders", callback_data="browse_drives")],
+        [InlineKeyboardButton("📦 GitHub Repos", callback_data="cmd:repos")],
+    ])
+    msg = update.message or update.callback_query.message
+    await msg.reply_text(
+        "🤖 *RepoMind AI – Commands*\n\n"
+        "*/browse* – Browse folders interactively\n"
+        "*/analyze* `<path>` – Analyze a project\n"
+        "*/push* `<path> <repo>` – Push to GitHub\n"
+        "*/repos* – List GitHub repos\n"
+        "*/projects* – List analyzed projects\n\n"
+        "💬 *Or just chat:*\n"
+        "`Go to Drive D`\n"
+        "`Analyze my drowsiness detection project`\n"
+        "`Push D:\\Projects\\MyApp to GitHub`",
+        parse_mode='Markdown', reply_markup=keyboard
+    )
 
+async def browse_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _show_drives(update.message.reply_text, context.bot_data)
 
 async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /analyze <project_path>")
         return
-    path = ' '.join(context.args)
-    await update.message.reply_text(f"🔍 Analyzing `{path}`...", parse_mode='Markdown')
-    try:
-        result = call_api('POST', '/analyze', {'project_path': path})
-        scan = result['scan']
-        analysis = result['analysis']
-        decisions = result['decisions']
-
-        msg = (
-            f"*Project:* `{result['project_name']}`\n"
-            f"*Total Size:* {scan['total_size_hr']}\n"
-            f"*Total Files:* {scan['total_files']}\n"
-            f"*Python Files:* {analysis['total_python_files']}\n"
-            f"*Lines of Code:* {analysis['total_lines_of_code']}\n"
-            f"*Frameworks:* {', '.join(analysis['detected_frameworks']) or 'None detected'}\n"
-            f"*Requirements.txt:* {'✅' if analysis['requirements_found'] else '❌'}\n"
-            f"*Git Initialized:* {'✅' if analysis['git_initialized'] else '❌'}\n"
-            f"*Model Files:* {len(analysis['model_files'])}\n"
-            f"*Large Files:* {len(scan['large_files'])}\n"
-            f"*Dataset Folders:* {len(scan['dataset_folders'])}\n"
-        )
-        if decisions['warn_large_files']:
-            msg += f"\n⚠️ *Warning:* {len(decisions['warn_large_files'])} large file(s) detected!\n"
-        await update.message.reply_text(msg, parse_mode='Markdown')
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
+    msg = await update.message.reply_text(f"🔍 Analyzing...", parse_mode='Markdown')
+    await _do_analyze(msg.edit_text, ' '.join(context.args))
 
 async def push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /push <project_path> <repo_name>")
         return
-    repo_name = context.args[-1]
-    path = ' '.join(context.args[:-1])
-    await update.message.reply_text(f"🚀 Pushing `{path}` to GitHub as `{repo_name}`...", parse_mode='Markdown')
-    try:
-        result = call_api('POST', '/push', {
-            'project_path': path,
-            'repo_name': repo_name,
-            'commit_message': 'Initial commit via RepoMind AI'
-        })
-        await update.message.reply_text(
-            f"✅ *Pushed successfully!*\n🔗 {result.get('url', '')}",
-            parse_mode='Markdown'
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ Push failed: {e}")
-
+    msg = await update.message.reply_text("🚀 Pushing...")
+    await _do_push(msg.edit_text, ' '.join(context.args[:-1]), context.args[-1])
 
 async def repos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📦 Fetching your GitHub repos...")
+    reply_fn = update.message.reply_text if update.message else update.callback_query.edit_message_text
     try:
         repos = call_api('GET', '/repos')
         if not repos:
-            await update.message.reply_text("No repositories found.")
+            await reply_fn("No repositories found.")
             return
-        msg = "*Your GitHub Repositories:*\n\n"
-        for r in repos[:15]:
-            lock = "🔒" if r.get('private') else "🌐"
-            msg += f"{lock} [{r['name']}]({r['url']})\n"
-        await update.message.reply_text(msg, parse_mode='Markdown', disable_web_page_preview=True)
+        lines = ["*Your GitHub Repositories:*\n"]
+        for r in repos[:20]:
+            lines.append(f"{'🔒' if r.get('private') else '🌐'} [{r['name']}]({r['url']})")
+        await reply_fn("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-
+        await reply_fn(f"❌ Error: {e}")
 
 async def projects_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     projects = db.get_all_projects()
+    reply_fn = update.message.reply_text if update.message else update.callback_query.edit_message_text
     if not projects:
-        await update.message.reply_text("No local projects analyzed yet. Use /analyze <path>")
+        await reply_fn("No projects analyzed yet. Use /browse or /analyze <path>")
         return
-    keyboard = build_project_keyboard(projects)
-    await update.message.reply_text("📁 *Analyzed Local Projects:*", parse_mode='Markdown', reply_markup=keyboard)
+    buttons = [[InlineKeyboardButton(
+        f"📁 {p['name']}",
+        callback_data=f"select:{_register_path(context.bot_data, p['path'])}"
+    )] for p in projects[:10]]
+    await reply_fn("🗃️ *Analyzed Projects:*", parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
 
-
+# ─── Button Handler ───────────────────────────────────────────────────────────
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    if data.startswith("analyze:"):
-        path = data[len("analyze:"):]
-        await query.edit_message_text(f"🔍 Analyzing `{path}`...", parse_mode='Markdown')
-        try:
-            result = call_api('POST', '/analyze', {'project_path': path})
-            scan = result['scan']
-            analysis = result['analysis']
-            msg = (
-                f"*Project:* `{result['project_name']}`\n"
-                f"*Total Size:* {scan['total_size_hr']}\n"
-                f"*Files:* {scan['total_files']} | *LOC:* {analysis['total_lines_of_code']}\n"
-                f"*Frameworks:* {', '.join(analysis['detected_frameworks']) or 'None'}\n"
+
+    if data == "browse_drives":
+        await _show_drives(query.edit_message_text, context.bot_data)
+
+    elif data == "cmd:repos":
+        await repos_cmd(update, context)
+
+    elif data == "cmd:projects":
+        await projects_cmd(update, context)
+
+    elif data.startswith("nav:"):
+        idx = int(data.split(":")[1])
+        path = _get_path(context.bot_data, idx)
+        if not path or not os.path.isdir(path):
+            await query.edit_message_text(f"❌ Path not found: `{path}`", parse_mode='Markdown')
+            return
+        subfolders = _get_subfolders(path)
+        if subfolders:
+            text, kb = _build_nav_keyboard(context.bot_data, path, subfolders)
+        else:
+            text, kb = _build_action_keyboard(context.bot_data, path)
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+
+    elif data.startswith("navp:"):
+        _, idx_s, page_s = data.split(":")
+        path = _get_path(context.bot_data, int(idx_s))
+        text, kb = _build_nav_keyboard(context.bot_data, path, _get_subfolders(path), page=int(page_s))
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+
+    elif data.startswith("select:"):
+        idx = int(data.split(":")[1])
+        path = _get_path(context.bot_data, idx)
+        text, kb = _build_action_keyboard(context.bot_data, path)
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+
+    elif data.startswith("act:"):
+        _, action, idx_s = data.split(":", 2)
+        path = _get_path(context.bot_data, int(idx_s))
+        pidx = int(idx_s)
+
+        if action == "analyze":
+            await query.edit_message_text(f"🔍 Analyzing `{path}`...", parse_mode='Markdown')
+            await _do_analyze(query.edit_message_text, path)
+
+        elif action == "push":
+            repo_name = os.path.basename(path).replace(' ', '-').lower()
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"✅ Push as '{repo_name}'", callback_data=f"pushconfirm:{pidx}:{repo_name}")],
+                [InlineKeyboardButton("🔙 Back", callback_data=f"select:{pidx}")],
+            ])
+            await query.edit_message_text(
+                f"🚀 *Push to GitHub*\n\n📁 `{path}`\n\nRepo name: *{repo_name}*\n\nConfirm?",
+                parse_mode='Markdown', reply_markup=kb
             )
-            await query.edit_message_text(msg, parse_mode='Markdown')
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error: {e}")
 
+        elif action == "structure":
+            await query.edit_message_text(f"🗂️ Loading structure...", parse_mode='Markdown')
+            await _do_structure(query.edit_message_text, path)
 
+    elif data.startswith("pushconfirm:"):
+        parts = data.split(":", 2)
+        path = _get_path(context.bot_data, int(parts[1]))
+        await query.edit_message_text(f"🚀 Pushing...", parse_mode='Markdown')
+        await _do_push(query.edit_message_text, path, parts[2])
+
+# ─── Natural Language Handler ─────────────────────────────────────────────────
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle natural language commands using Groq LLM + fuzzy matching."""
     text = update.message.text
+
+    # Direct drive detection → start folder navigation
+    drive = _detect_drive(text)
+    if drive:
+        if os.path.exists(drive):
+            subfolders = _get_subfolders(drive)
+            if subfolders:
+                nav_text, kb = _build_nav_keyboard(context.bot_data, drive, subfolders)
+                await update.message.reply_text(nav_text, parse_mode='Markdown', reply_markup=kb)
+            else:
+                t, kb = _build_action_keyboard(context.bot_data, drive)
+                await update.message.reply_text(t, parse_mode='Markdown', reply_markup=kb)
+        else:
+            await update.message.reply_text(f"❌ Drive `{drive}` not found.", parse_mode='Markdown')
+        return
+
+    thinking = await update.message.reply_text("🤔 Processing...")
     projects = db.get_all_projects()
     project_names = [p['name'] for p in projects]
 
-    # Send immediate acknowledgement so user isn't waiting silently
-    thinking_msg = await update.message.reply_text("🤔 Processing your request...")
-
-    # Try Groq LLM interpretation first
     try:
         intent = interpret_command(text, project_names)
         action = intent.get('action', 'unknown')
         params = intent.get('params', {})
 
         if action == 'analyze' and params.get('project_path'):
-            path = params['project_path']
-            await thinking_msg.edit_text(f"🔍 Analyzing `{path}`...", parse_mode='Markdown')
-            try:
-                result = call_api('POST', '/analyze', {'project_path': path})
-                scan = result['scan']
-                analysis = result['analysis']
-                decisions = result['decisions']
-                msg = (
-                    f"*Project:* `{result['project_name']}`\n"
-                    f"*Total Size:* {scan['total_size_hr']}\n"
-                    f"*Total Files:* {scan['total_files']}\n"
-                    f"*Python Files:* {analysis['total_python_files']}\n"
-                    f"*Lines of Code:* {analysis['total_lines_of_code']}\n"
-                    f"*Frameworks:* {', '.join(analysis['detected_frameworks']) or 'None detected'}\n"
-                    f"*Requirements.txt:* {'✅' if analysis['requirements_found'] else '❌'}\n"
-                    f"*Git Initialized:* {'✅' if analysis['git_initialized'] else '❌'}\n"
-                    f"*Model Files:* {len(analysis['model_files'])}\n"
-                    f"*Large Files:* {len(scan['large_files'])}\n"
-                    f"*Dataset Folders:* {len(scan['dataset_folders'])}\n"
-                )
-                if decisions['warn_large_files']:
-                    msg += f"\n⚠️ *Warning:* {len(decisions['warn_large_files'])} large file(s) detected!\n"
-                await thinking_msg.edit_text(msg, parse_mode='Markdown')
-            except Exception as e:
-                await thinking_msg.edit_text(f"❌ Error analyzing `{path}`: {e}", parse_mode='Markdown')
+            await thinking.edit_text(f"🔍 Analyzing...", parse_mode='Markdown')
+            await _do_analyze(thinking.edit_text, params['project_path'])
             return
-
-        elif action == 'push' and params.get('project_path') and params.get('repo_name'):
+        elif action == 'push' and params.get('project_path'):
             path = params['project_path']
-            repo_name = params['repo_name']
-            await thinking_msg.edit_text(f"🚀 Pushing `{path}` as `{repo_name}`...", parse_mode='Markdown')
-            try:
-                result = call_api('POST', '/push', {
-                    'project_path': path,
-                    'repo_name': repo_name,
-                    'commit_message': 'Commit via RepoMind AI'
-                })
-                await thinking_msg.edit_text(
-                    f"✅ *Pushed!*\n🔗 {result.get('url', '')}",
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                await thinking_msg.edit_text(f"❌ Push failed: {e}", parse_mode='Markdown')
+            repo = params.get('repo_name', os.path.basename(path).replace(' ', '-').lower())
+            await thinking.edit_text(f"🚀 Pushing...")
+            await _do_push(thinking.edit_text, path, repo)
             return
-
         elif action == 'list_repos':
-            await thinking_msg.delete()
-            await repos_cmd(update, context)
-            return
+            await thinking.delete(); await repos_cmd(update, context); return
         elif action == 'list_projects':
-            await thinking_msg.delete()
-            await projects_cmd(update, context)
-            return
+            await thinking.delete(); await projects_cmd(update, context); return
         elif action == 'help':
-            await thinking_msg.delete()
-            await help_cmd(update, context)
-            return
+            await thinking.delete(); await help_cmd(update, context); return
     except Exception:
         pass
 
-    # Fallback: fuzzy match project name
+    # Fuzzy match fallback
     matches = fuzzy_match_all(text.lower(), project_names, threshold=60, limit=3)
     if matches:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(m, callback_data=f"analyze:{next(p['path'] for p in projects if p['name']==m)}")]
-            for m in matches
-        ])
-        await thinking_msg.edit_text("Did you mean one of these projects?", reply_markup=keyboard)
+        buttons = [[InlineKeyboardButton(
+            m, callback_data=f"select:{_register_path(context.bot_data, next(p['path'] for p in projects if p['name']==m))}"
+        )] for m in matches]
+        await thinking.edit_text("Did you mean one of these?", reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await thinking_msg.edit_text("I didn't understand that. Use /help to see available commands.")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📂 Browse Folders", callback_data="browse_drives")],
+            [InlineKeyboardButton("📦 GitHub Repos", callback_data="cmd:repos")],
+            [InlineKeyboardButton("🗃️ Analyzed Projects", callback_data="cmd:projects")],
+        ])
+        await thinking.edit_text("What would you like to do?", reply_markup=keyboard)
 
-
+# ─── Bot Entry Point ──────────────────────────────────────────────────────────
 def run_bot():
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     if not token:
@@ -250,6 +396,7 @@ def run_bot():
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('help', help_cmd))
+    app.add_handler(CommandHandler('browse', browse_cmd))
     app.add_handler(CommandHandler('analyze', analyze_cmd))
     app.add_handler(CommandHandler('push', push_cmd))
     app.add_handler(CommandHandler('repos', repos_cmd))
@@ -258,6 +405,10 @@ def run_bot():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     print("RepoMind AI Telegram Bot is running...")
     app.run_polling()
+
+if __name__ == '__main__':
+    run_bot()
+
 
 
 if __name__ == '__main__':
