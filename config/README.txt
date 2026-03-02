@@ -1,0 +1,1 @@
+This folder will contain configuration files and templates for RepoMind AI.

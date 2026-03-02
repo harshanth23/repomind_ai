@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+python-telegram-bot
+rapidfuzz
+groq
+GitPython
+python-docx
+pydantic

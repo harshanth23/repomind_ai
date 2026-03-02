@@ -1,0 +1,1 @@
+This folder will contain SQLite database files and migration scripts for RepoMind AI.
