@@ -88,10 +88,11 @@ def push(req: PushRequest):
         try:
             agent.create_repo(req.repo_name, description=req.description, private=req.private)
         except Exception as e:
-            if "already exists" in str(e).lower() or "422" in str(e):
+            err = str(e)
+            if "already exists" in err.lower() or "422" in err:
                 pass  # Repo exists, that's fine
             else:
-                raise HTTPException(status_code=500, detail=f"Failed to create repo: {e}")
+                raise HTTPException(status_code=500, detail=err)
     else:
         if not agent.repo_exists(req.repo_name):
             raise HTTPException(status_code=404, detail=f"Repo '{req.repo_name}' not found on GitHub")

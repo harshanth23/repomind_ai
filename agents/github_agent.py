@@ -18,6 +18,11 @@ class GitHubAgent:
         url = f"{self.API_BASE}/user/repos"
         payload = {"name": repo_name, "description": description, "private": private, "auto_init": False}
         response = requests.post(url, json=payload, headers=self.headers)
+        if response.status_code == 404:
+            raise Exception("Token cannot create repos. Go to github.com/settings/tokens → generate Classic token with 'repo' scope → update GITHUB_TOKEN in .env")
+        if response.status_code == 422:
+            msg = response.json().get('errors', [{}])[0].get('message', 'repo already exists')
+            raise Exception(f"422: {msg}")
         response.raise_for_status()
         return response.json()
 
@@ -82,7 +87,11 @@ class GitHubAgent:
         try:
             repo.git.push('--set-upstream', 'origin', 'HEAD:main', '--force')
         except Exception as e:
-            raise RuntimeError(f"Git push failed: {e}")
+            # Extract the meaningful stderr from GitCommandError
+            stderr = getattr(e, 'stderr', '') or ''
+            stdout = getattr(e, 'stdout', '') or ''
+            detail = (stderr or stdout or str(e)).strip()
+            raise RuntimeError(f"Git push failed: {detail}")
 
         return {"status": "pushed", "repo": repo_name, "url": f"https://github.com/{self.username}/{repo_name}"}
 
