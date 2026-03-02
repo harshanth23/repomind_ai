@@ -111,12 +111,17 @@ def _build_action_keyboard(bot_data: dict, path: str):
     idx = _register_path(bot_data, path)
     name = os.path.basename(path) or path
     text = f"📁 *Selected:* `{_esc(path)}`\n\nWhat do you want to do with *{_esc(name)}*?"
+    parent = os.path.dirname(path)
+    back_target = _register_path(bot_data, parent) if parent and parent != path else None
     buttons = [
         [InlineKeyboardButton("🔍 1️⃣  Analyze", callback_data=f"act:analyze:{idx}")],
         [InlineKeyboardButton("🚀 2️⃣  Push to GitHub", callback_data=f"act:push:{idx}")],
         [InlineKeyboardButton("🗂️ 3️⃣  Show Structure", callback_data=f"act:structure:{idx}")],
-        [InlineKeyboardButton("🔙 Back", callback_data=f"nav:{idx}")],
     ]
+    if back_target is not None:
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"nav:{back_target}")])
+    else:
+        buttons.append([InlineKeyboardButton("🔙 Back to Drives", callback_data="browse_drives")])
     return text, InlineKeyboardMarkup(buttons)
 
 # ─── Action Executors ─────────────────────────────────────────────────────────
