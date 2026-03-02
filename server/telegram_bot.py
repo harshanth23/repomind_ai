@@ -167,15 +167,17 @@ async def _do_analyze(edit_fn, path: str, bot_data: dict = None):
     except Exception as e:
         await edit_fn(f"❌ Error: {e}")
 
-async def _do_push(edit_fn, path: str, repo_name: str = None):
+async def _do_push(edit_fn, path: str, repo_name: str = None, use_existing: bool = False):
     if not repo_name:
         repo_name = os.path.basename(path).replace(' ', '-').lower()
     try:
         result = call_api('POST', '/push', {
             'project_path': path, 'repo_name': repo_name,
-            'commit_message': 'Commit via RepoMind AI'
+            'commit_message': 'Commit via RepoMind AI',
+            'use_existing': use_existing
         })
-        await edit_fn(f"✅ *Pushed!*\n🔗 {result.get('url', '')}", parse_mode=None)
+        url = result.get('url', '')
+        await edit_fn(f"✅ Pushed successfully!\n🔗 {url}", parse_mode=None)
     except Exception as e:
         await edit_fn(f"❌ Push failed: {e}")
 
@@ -354,11 +356,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif action == "push":
             repo_name = os.path.basename(path).replace(' ', '-').lower()
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"✅ Push as '{repo_name}'", callback_data=f"pushconfirm:{pidx}:{repo_name}")],
+                [InlineKeyboardButton("➕ Create new repo", callback_data=f"pushnew:{pidx}:{repo_name}")],
+                [InlineKeyboardButton("📂 Push to existing repo", callback_data=f"pushexist:{pidx}")],
                 [InlineKeyboardButton("🔙 Back", callback_data=f"select:{pidx}")],
             ])
             await query.edit_message_text(
-                f"🚀 *Push to GitHub*\n\n📁 `{_esc(path)}`\n\nRepo name: *{_esc(repo_name)}*\n\nConfirm?",
+                f"🚀 *Push to GitHub*\n\n📁 `{_esc(path)}`\n\nHow do you want to push?",
                 parse_mode='Markdown', reply_markup=kb
             )
 
@@ -366,11 +369,52 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"🗂️ Loading structure...", parse_mode='Markdown')
             await _do_structure(query.edit_message_text, path, context.bot_data)
 
-    elif data.startswith("pushconfirm:"):
+    elif data.startswith("pushnew:"):
+        # pushnew:{path_idx}:{repo_name}
         parts = data.split(":", 2)
         path = _get_path(context.bot_data, int(parts[1]))
-        await query.edit_message_text(f"🚀 Pushing...", parse_mode='Markdown')
-        await _do_push(query.edit_message_text, path, parts[2])
+        repo_name = parts[2]
+        pidx = int(parts[1])
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ Confirm: create '{repo_name}'", callback_data=f"pushconfirm:{pidx}:{repo_name}:new")],
+            [InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}")],
+        ])
+        await query.edit_message_text(
+            f"🚀 *New Repo*\n\n📁 `{_esc(path)}`\nRepo: *{_esc(repo_name)}*\n\nA new public repo will be created on GitHub.",
+            parse_mode='Markdown', reply_markup=kb
+        )
+
+    elif data.startswith("pushexist:"):
+        pidx = int(data.split(":")[1])
+        path = _get_path(context.bot_data, pidx)
+        await query.edit_message_text("🔄 Loading your repos...", parse_mode='Markdown')
+        try:
+            repos = call_api('GET', '/repos')
+            if not repos:
+                await query.edit_message_text("❌ No GitHub repos found.")
+                return
+            buttons = []
+            for r in repos[:20]:
+                rname = r['name']
+                buttons.append([InlineKeyboardButton(
+                    f"{'\U0001f512' if r.get('private') else '\U0001f310'} {rname}",
+                    callback_data=f"pushconfirm:{pidx}:{rname}:exist"
+                )])
+            buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}")])
+            await query.edit_message_text(
+                f"📂 *Select existing repo to push to:*",
+                parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Failed to load repos: {e}")
+
+    elif data.startswith("pushconfirm:"):
+        parts = data.split(":", 3)
+        path = _get_path(context.bot_data, int(parts[1]))
+        repo_name = parts[2]
+        use_existing = len(parts) > 3 and parts[3] == 'exist'
+        await query.edit_message_text(f"🚀 Pushing to *{_esc(repo_name)}*...", parse_mode='Markdown')
+        await _do_push(query.edit_message_text, path, repo_name, use_existing=use_existing)
 
 # ─── Natural Language Handler ─────────────────────────────────────────────────
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

@@ -38,8 +38,12 @@ class GitHubAgent:
         response = requests.delete(url, headers=self.headers)
         return response.status_code == 204
 
+    def repo_exists(self, repo_name: str) -> bool:
+        url = f"{self.API_BASE}/repos/{self.username}/{repo_name}"
+        return requests.get(url, headers=self.headers).status_code == 200
+
     def push_repo(self, repo_path: str, repo_name: str, commit_message: str = "Initial commit",
-                  exclude_paths: list = None) -> dict:
+                  exclude_paths: list = None, use_existing: bool = False) -> dict:
         remote_url = f"https://{self.token}@github.com/{self.username}/{repo_name}.git"
         try:
             repo = Repo(repo_path)
@@ -59,7 +63,15 @@ class GitHubAgent:
                         f.write(f"\n{rel}\n")
 
         repo.git.add(A=True)
-        if repo.is_dirty(index=True, untracked_files=False) or len(repo.index.entries) > 0:
+        # Only commit if there are staged changes
+        try:
+            staged = repo.git.diff('--cached', '--name-only').strip()
+        except Exception:
+            staged = ""
+        if staged:
+            repo.index.commit(commit_message)
+        elif not repo.head.is_valid():
+            # Brand new repo with no commits at all — make an empty initial commit
             repo.index.commit(commit_message)
 
         if 'origin' in [r.name for r in repo.remotes]:

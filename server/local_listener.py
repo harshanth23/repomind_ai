@@ -29,6 +29,7 @@ class PushRequest(BaseModel):
     description: str = ""
     commit_message: str = "Initial commit"
     private: bool = False
+    use_existing: bool = False
     dataset_links: dict = {}
     project_info: dict = {}
 
@@ -82,14 +83,18 @@ def push(req: PushRequest):
 
     agent = GitHubAgent(token=token, username=username)
 
-    # Create GitHub repo
-    try:
-        agent.create_repo(req.repo_name, description=req.description, private=req.private)
-    except Exception as e:
-        if "already exists" in str(e).lower() or "422" in str(e):
-            pass  # Repo already exists, continue
-        else:
-            raise HTTPException(status_code=500, detail=f"Failed to create repo: {e}")
+    # Create or verify GitHub repo
+    if not req.use_existing:
+        try:
+            agent.create_repo(req.repo_name, description=req.description, private=req.private)
+        except Exception as e:
+            if "already exists" in str(e).lower() or "422" in str(e):
+                pass  # Repo exists, that's fine
+            else:
+                raise HTTPException(status_code=500, detail=f"Failed to create repo: {e}")
+    else:
+        if not agent.repo_exists(req.repo_name):
+            raise HTTPException(status_code=404, detail=f"Repo '{req.repo_name}' not found on GitHub")
 
     # Generate README
     project_info = req.project_info or {}
@@ -105,7 +110,8 @@ def push(req: PushRequest):
             repo_path=req.project_path,
             repo_name=req.repo_name,
             commit_message=req.commit_message,
-            exclude_paths=list(req.dataset_links.keys()) if req.dataset_links else None
+            exclude_paths=list(req.dataset_links.keys()) if req.dataset_links else None,
+            use_existing=req.use_existing
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
