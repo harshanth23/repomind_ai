@@ -396,8 +396,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons = []
             for r in repos[:20]:
                 rname = r['name']
+                lock = '🔒' if r.get('private') else '🌐'
                 buttons.append([InlineKeyboardButton(
-                    f"{'\U0001f512' if r.get('private') else '\U0001f310'} {rname}",
+                    f"{lock} {rname}",
                     callback_data=f"pushconfirm:{pidx}:{rname}:exist"
                 )])
             buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}")])
