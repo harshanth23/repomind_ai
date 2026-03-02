@@ -285,10 +285,19 @@ async def repos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not repos:
             await reply_fn("No repositories found.")
             return
-        lines = ["*Your GitHub Repositories:*\n"]
+        buttons = []
         for r in repos[:20]:
-            lines.append(f"{'🔒' if r.get('private') else '🌐'} {_esc(r['name'])} \\- {r['url']}")
-        await reply_fn("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
+            lock = '🔒' if r.get('private') else '🌐'
+            buttons.append([InlineKeyboardButton(
+                f"{lock} {r['name']}",
+                callback_data=f"repoinfo:{r['name']}"
+            )])
+        buttons.append([InlineKeyboardButton("🔙 Back", callback_data="browse_drives")])
+        await reply_fn(
+            f"*Your GitHub Repositories* ({len(repos)}):\n\nTap a repo to see insights.",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
     except Exception as e:
         await reply_fn(f"❌ Error: {e}")
 
@@ -315,6 +324,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "cmd:repos":
         await repos_cmd(update, context)
+
+    elif data.startswith("repoinfo:"):
+        repo_name = data.split(":", 1)[1]
+        await query.edit_message_text(f"🔄 Loading info for *{_esc(repo_name)}*...", parse_mode='Markdown')
+        try:
+            r = call_api('GET', f'/repo_info/{repo_name}')
+            size_kb = r.get('size', 0)
+            size_str = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb} KB"
+            pushed = r.get('pushed_at', '')[:10] if r.get('pushed_at') else 'N/A'
+            created = r.get('created_at', '')[:10] if r.get('created_at') else 'N/A'
+            topics = ', '.join(r.get('topics', [])) or 'None'
+            desc = r.get('description') or '_No description_'
+            visibility = '🔒 Private' if r.get('private') else '🌐 Public'
+            text = (
+                f"📊 *Repository Insights*\n\n"
+                f"📦 *Name:* {_esc(r.get('name', repo_name))}\n"
+                f"📝 *Description:* {_esc(str(desc))}\n"
+                f"🔏 *Visibility:* {visibility}\n"
+                f"💻 *Language:* {r.get('language') or 'N/A'}\n"
+                f"⭐ *Stars:* {r.get('stargazers_count', 0)}\n"
+                f"🍴 *Forks:* {r.get('forks_count', 0)}\n"
+                f"⚠️ *Open Issues:* {r.get('open_issues_count', 0)}\n"
+                f"💾 *Size:* {size_str}\n"
+                f"🌿 *Default Branch:* {r.get('default_branch', 'main')}\n"
+                f"🏷️ *Topics:* {_esc(topics)}\n"
+                f"📅 *Created:* {created}\n"
+                f"🔄 *Last Push:* {pushed}\n"
+            )
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Open on GitHub", url=r.get('html_url', ''))],
+                [InlineKeyboardButton("🔙 Back to Repos", callback_data="cmd:repos")],
+            ])
+            await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+        except Exception as e:
+            await query.edit_message_text(f"❌ Failed to load repo info: {e}")
 
     elif data == "cmd:projects":
         await projects_cmd(update, context)
