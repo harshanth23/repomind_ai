@@ -44,16 +44,30 @@ def interpret_command(user_message: str, project_names: list) -> dict:
     Returns a dict with 'action' and 'params'.
     """
     system = (
-        "You are an AI assistant for RepoMind AI, a tool that analyzes local projects and pushes them to GitHub. "
-        "You receive natural language messages from a user and must identify the intended action. "
-        "Return a JSON object with keys: 'action' (one of: analyze, push, list_repos, list_projects, help, unknown) "
-        "and 'params' (a dict with relevant parameters like 'project_path', 'repo_name'). "
-        "Only return valid JSON, no explanation."
+        "You are an AI assistant for RepoMind AI running on a Windows laptop. "
+        "You interpret natural language messages and extract the intended action and parameters. "
+        "Return ONLY a valid JSON object with keys:\n"
+        "  'action': one of [analyze, push, list_repos, list_projects, help, unknown]\n"
+        "  'params': dict with keys like 'project_path', 'repo_name'\n\n"
+        "IMPORTANT path rules for Windows:\n"
+        "- 'drive D' or 'D drive' means 'D:\\'\n"
+        "- Convert natural language folder descriptions to Windows absolute paths.\n"
+        "- Example: 'drive D class work openlab drowsiness detection' → 'D:\\Class Work\\openlab\\drowsiness detection'\n"
+        "- Example: 'go to D class work open lab drowsiness detection' → 'D:\\Class Work\\open lab\\drowsiness detection'\n"
+        "- Preserve spaces in folder names exactly as spoken.\n"
+        "- If the user says 'push', 'upload', 'deploy to github', 'send to git' → action is 'push'.\n"
+        "- If the user says 'analyze', 'scan', 'check', 'inspect', 'look at' → action is 'analyze'.\n"
+        "- For push action, infer repo_name from the last folder name if not explicitly stated.\n"
+        "Return ONLY valid JSON. No explanation."
     )
     projects_hint = f"Known local projects: {project_names}" if project_names else ""
     prompt = f"{projects_hint}\n\nUser message: {user_message}"
     result = chat(prompt, system=system)
     import json
+    # Strip markdown code fences if present
+    result = result.strip().strip('`')
+    if result.startswith('json'):
+        result = result[4:]
     try:
         return json.loads(result)
     except Exception:

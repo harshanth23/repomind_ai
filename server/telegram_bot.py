@@ -161,6 +161,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     projects = db.get_all_projects()
     project_names = [p['name'] for p in projects]
 
+    # Send immediate acknowledgement so user isn't waiting silently
+    thinking_msg = await update.message.reply_text("🤔 Processing your request...")
+
     # Try Groq LLM interpretation first
     try:
         intent = interpret_command(text, project_names)
@@ -168,20 +171,61 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         params = intent.get('params', {})
 
         if action == 'analyze' and params.get('project_path'):
-            context.args = [params['project_path']]
-            await analyze_cmd(update, context)
+            path = params['project_path']
+            await thinking_msg.edit_text(f"🔍 Analyzing `{path}`...", parse_mode='Markdown')
+            try:
+                result = call_api('POST', '/analyze', {'project_path': path})
+                scan = result['scan']
+                analysis = result['analysis']
+                decisions = result['decisions']
+                msg = (
+                    f"*Project:* `{result['project_name']}`\n"
+                    f"*Total Size:* {scan['total_size_hr']}\n"
+                    f"*Total Files:* {scan['total_files']}\n"
+                    f"*Python Files:* {analysis['total_python_files']}\n"
+                    f"*Lines of Code:* {analysis['total_lines_of_code']}\n"
+                    f"*Frameworks:* {', '.join(analysis['detected_frameworks']) or 'None detected'}\n"
+                    f"*Requirements.txt:* {'✅' if analysis['requirements_found'] else '❌'}\n"
+                    f"*Git Initialized:* {'✅' if analysis['git_initialized'] else '❌'}\n"
+                    f"*Model Files:* {len(analysis['model_files'])}\n"
+                    f"*Large Files:* {len(scan['large_files'])}\n"
+                    f"*Dataset Folders:* {len(scan['dataset_folders'])}\n"
+                )
+                if decisions['warn_large_files']:
+                    msg += f"\n⚠️ *Warning:* {len(decisions['warn_large_files'])} large file(s) detected!\n"
+                await thinking_msg.edit_text(msg, parse_mode='Markdown')
+            except Exception as e:
+                await thinking_msg.edit_text(f"❌ Error analyzing `{path}`: {e}", parse_mode='Markdown')
             return
+
         elif action == 'push' and params.get('project_path') and params.get('repo_name'):
-            context.args = [params['project_path'], params['repo_name']]
-            await push_cmd(update, context)
+            path = params['project_path']
+            repo_name = params['repo_name']
+            await thinking_msg.edit_text(f"🚀 Pushing `{path}` as `{repo_name}`...", parse_mode='Markdown')
+            try:
+                result = call_api('POST', '/push', {
+                    'project_path': path,
+                    'repo_name': repo_name,
+                    'commit_message': 'Commit via RepoMind AI'
+                })
+                await thinking_msg.edit_text(
+                    f"✅ *Pushed!*\n🔗 {result.get('url', '')}",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                await thinking_msg.edit_text(f"❌ Push failed: {e}", parse_mode='Markdown')
             return
+
         elif action == 'list_repos':
+            await thinking_msg.delete()
             await repos_cmd(update, context)
             return
         elif action == 'list_projects':
+            await thinking_msg.delete()
             await projects_cmd(update, context)
             return
         elif action == 'help':
+            await thinking_msg.delete()
             await help_cmd(update, context)
             return
     except Exception:
@@ -194,9 +238,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(m, callback_data=f"analyze:{next(p['path'] for p in projects if p['name']==m)}")]
             for m in matches
         ])
-        await update.message.reply_text("Did you mean one of these projects?", reply_markup=keyboard)
+        await thinking_msg.edit_text("Did you mean one of these projects?", reply_markup=keyboard)
     else:
-        await update.message.reply_text("I didn't understand that. Use /help to see available commands.")
+        await thinking_msg.edit_text("I didn't understand that. Use /help to see available commands.")
 
 
 def run_bot():
