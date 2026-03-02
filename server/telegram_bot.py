@@ -37,6 +37,13 @@ def _register_path(bot_data: dict, path: str) -> int:
 def _get_path(bot_data: dict, idx: int) -> str:
     return bot_data.get('paths', {}).get(idx, '')
 
+# ─── Markdown Escape Helper ─────────────────────────────────────────────────
+def _esc(text: str) -> str:
+    """Escape Markdown v1 special characters in dynamic text (names, paths)."""
+    for ch in ['_', '*', '[', '`']:
+        text = text.replace(ch, f'\\{ch}')
+    return text
+
 # ─── API Helper ───────────────────────────────────────────────────────────────
 def call_api(method: str, endpoint: str, payload: dict = None) -> dict:
     url = f"{SERVER_URL}{endpoint}"
@@ -74,12 +81,12 @@ def _build_nav_keyboard(bot_data: dict, path: str, subfolders: list, page: int =
     start = page * FOLDER_PAGE_SIZE
     page_folders = subfolders[start:start + FOLDER_PAGE_SIZE]
     folder_name = os.path.basename(path) or path
-    lines = [f"📂 *{folder_name}*\n"]
+    lines = [f"📂 *{_esc(folder_name)}*\n"]
     buttons = []
     for i, fp in enumerate(page_folders):
         name = os.path.basename(fp)
         em = EMOJI_NUM[i] if i < len(EMOJI_NUM) else f"{start+i+1}."
-        lines.append(f"{em} {name}")
+        lines.append(f"{em} {_esc(name)}")
         idx = _register_path(bot_data, fp)
         buttons.append([InlineKeyboardButton(f"{em} {name}", callback_data=f"nav:{idx}")])
     # Pagination
@@ -103,7 +110,7 @@ def _build_nav_keyboard(bot_data: dict, path: str, subfolders: list, page: int =
 def _build_action_keyboard(bot_data: dict, path: str):
     idx = _register_path(bot_data, path)
     name = os.path.basename(path) or path
-    text = f"📁 *Selected:* `{path}`\n\nWhat do you want to do with *{name}*?"
+    text = f"📁 *Selected:* `{_esc(path)}`\n\nWhat do you want to do with *{_esc(name)}*?"
     buttons = [
         [InlineKeyboardButton("🔍 1️⃣  Analyze", callback_data=f"act:analyze:{idx}")],
         [InlineKeyboardButton("🚀 2️⃣  Push to GitHub", callback_data=f"act:push:{idx}")],
@@ -119,7 +126,7 @@ async def _do_analyze(edit_fn, path: str):
         scan, analysis, decisions = result['scan'], result['analysis'], result['decisions']
         text = (
             f"✅ *Analysis Complete*\n\n"
-            f"📁 *Project:* `{result['project_name']}`\n"
+            f"📁 *Project:* `{_esc(result['project_name'])}`\n"
             f"💾 *Size:* {scan['total_size_hr']}\n"
             f"📄 *Files:* {scan['total_files']}\n"
             f"🐍 *Python Files:* {analysis['total_python_files']}\n"
@@ -145,12 +152,12 @@ async def _do_push(edit_fn, path: str, repo_name: str = None):
             'project_path': path, 'repo_name': repo_name,
             'commit_message': 'Commit via RepoMind AI'
         })
-        await edit_fn(f"✅ *Pushed!*\n🔗 {result.get('url', '')}", parse_mode='Markdown')
+        await edit_fn(f"✅ *Pushed!*\n🔗 {result.get('url', '')}", parse_mode=None)
     except Exception as e:
         await edit_fn(f"❌ Push failed: {e}")
 
 async def _do_structure(edit_fn, path: str):
-    lines = [f"🗂️ *Structure:* `{os.path.basename(path)}`\n"]
+    lines = [f"🗂️ *Structure:* `{_esc(os.path.basename(path))}`\n"]
     count = 0
     for dirpath, dirnames, filenames in os.walk(path):
         dirnames[:] = [d for d in dirnames if not d.startswith('.')]
@@ -239,7 +246,7 @@ async def repos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         lines = ["*Your GitHub Repositories:*\n"]
         for r in repos[:20]:
-            lines.append(f"{'🔒' if r.get('private') else '🌐'} [{r['name']}]({r['url']})")
+            lines.append(f"{'🔒' if r.get('private') else '🌐'} {_esc(r['name'])} \\- {r['url']}")
         await reply_fn("\n".join(lines), parse_mode='Markdown', disable_web_page_preview=True)
     except Exception as e:
         await reply_fn(f"❌ Error: {e}")
@@ -312,7 +319,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🔙 Back", callback_data=f"select:{pidx}")],
             ])
             await query.edit_message_text(
-                f"🚀 *Push to GitHub*\n\n📁 `{path}`\n\nRepo name: *{repo_name}*\n\nConfirm?",
+                f"🚀 *Push to GitHub*\n\n📁 `{_esc(path)}`\n\nRepo name: *{_esc(repo_name)}*\n\nConfirm?",
                 parse_mode='Markdown', reply_markup=kb
             )
 
