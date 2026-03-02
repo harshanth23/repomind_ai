@@ -1,8 +1,10 @@
+import asyncio
 import os
 import sys
 import re
 import string
 import requests
+from functools import partial
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -45,11 +47,20 @@ def _esc(text: str) -> str:
     return text
 
 # ─── API Helper ───────────────────────────────────────────────────────────────
-def call_api(method: str, endpoint: str, payload: dict = None) -> dict:
+def _call_api_sync(method: str, endpoint: str, payload: dict = None, timeout: int = 180) -> dict:
     url = f"{SERVER_URL}{endpoint}"
-    resp = requests.get(url) if method == 'GET' else requests.post(url, json=payload)
+    resp = requests.get(url, timeout=timeout) if method == 'GET' else requests.post(url, json=payload, timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+
+def call_api(method: str, endpoint: str, payload: dict = None) -> dict:
+    """Sync wrapper kept for backward compat."""
+    return _call_api_sync(method, endpoint, payload)
+
+async def call_api_async(method: str, endpoint: str, payload: dict = None, timeout: int = 180) -> dict:
+    """Non-blocking version — runs the HTTP call in a thread executor."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(_call_api_sync, method, endpoint, payload, timeout))
 
 # ─── Shared UI Helpers ──────────────────────────────────────────────────────
 HOME_BTN = InlineKeyboardButton("🏠 Main Menu", callback_data="mainmenu")
@@ -150,7 +161,7 @@ async def _do_analyze(edit_fn, path: str, bot_data: dict = None, exclude_paths: 
         payload = {'project_path': path}
         if exclude_paths:
             payload['exclude_paths'] = exclude_paths
-        result = call_api('POST', '/analyze', payload)
+        result = await call_api_async('POST', '/analyze', payload, timeout=120)
         scan, analysis, decisions = result['scan'], result['analysis'], result['decisions']
         text = (
             f"✅ *Analysis Complete*\n\n"
@@ -195,12 +206,13 @@ async def _do_push(edit_fn, path: str, repo_name: str = None, use_existing: bool
     if not repo_name:
         repo_name = os.path.basename(path).replace(' ', '-').lower()
     try:
-        result = call_api('POST', '/push', {
+        await edit_fn(f"🔄 *Preparing push...* _(generating README \& description — may take ~30s)_", parse_mode='Markdown')
+        result = await call_api_async('POST', '/push', {
             'project_path': path, 'repo_name': repo_name,
             'commit_message': 'Commit via RepoMind AI',
             'use_existing': use_existing,
             'dataset_links': {p: '' for p in (exclude_paths or [])}
-        })
+        }, timeout=180)
         url = result.get('url', '')
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Open on GitHub", url=url)], [HOME_BTN]])
         await edit_fn(f"✅ *Pushed successfully!*\n🔗 {url}", parse_mode='Markdown', reply_markup=kb)
@@ -363,7 +375,7 @@ async def push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def repos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_fn = update.message.reply_text if update.message else update.callback_query.edit_message_text
     try:
-        repos = call_api('GET', '/repos')
+        repos = await call_api_async('GET', '/repos')
         if not repos:
             await reply_fn("No repositories found.")
             return
@@ -414,7 +426,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         repo_name = data.split(":", 1)[1]
         await query.edit_message_text(f"🔄 Loading info for *{_esc(repo_name)}*...", parse_mode='Markdown')
         try:
-            r = call_api('GET', f'/repo_info/{repo_name}')
+            r = await call_api_async('GET', f'/repo_info/{repo_name}')
             size_kb = r.get('size', 0)
             size_str = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb} KB"
             pushed = r.get('pushed_at', '')[:10] if r.get('pushed_at') else 'N/A'
@@ -431,9 +443,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⭐ *Stars:* {r.get('stargazers_count', 0)}\n"
                 f"🍴 *Forks:* {r.get('forks_count', 0)}\n"
                 f"⚠️ *Open Issues:* {r.get('open_issues_count', 0)}\n"
-                f"💾 *Size:* {size_str}\n"
                 f"🌿 *Default Branch:* {r.get('default_branch', 'main')}\n"
-                f"🏷️ *Topics:* {_esc(topics)}\n"
                 f"📅 *Created:* {created}\n"
                 f"🔄 *Last Push:* {pushed}\n"
             )
@@ -534,7 +544,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         path = _get_path(context.bot_data, pidx)
         await query.edit_message_text("🔄 Loading your repos...", parse_mode='Markdown')
         try:
-            repos = call_api('GET', '/repos')
+            repos = await call_api_async('GET', '/repos')
             if not repos:
                 await query.edit_message_text("❌ No GitHub repos found.")
                 return
@@ -731,11 +741,6 @@ def run_bot():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     print("RepoMind AI Telegram Bot is running...")
     app.run_polling()
-
-if __name__ == '__main__':
-    run_bot()
-
-
 
 if __name__ == '__main__':
     run_bot()

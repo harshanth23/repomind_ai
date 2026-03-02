@@ -172,10 +172,12 @@ def _push_impl(req: PushRequest):
     agent = GitHubAgent(token=token, username=username)
 
     # Quick scan+analyze to feed real data into README and description
+    # Use exclude_paths from dataset_links keys so we skip heavy data folders
+    _excl = list(req.dataset_links.keys()) if req.dataset_links else None
     try:
-        _scanner  = ProjectScanner(req.project_path)
+        _scanner  = ProjectScanner(req.project_path, exclude_paths=_excl)
         _scan     = _scanner.scan()
-        _analyzer = ProjectAnalyzer(req.project_path)
+        _analyzer = ProjectAnalyzer(req.project_path, exclude_paths=_excl)
         _analysis = _analyzer.analyze()
     except Exception:
         _scan = {}
@@ -240,7 +242,15 @@ def _push_impl(req: PushRequest):
     project_info['dataset_folders']     = _scan.get('dataset_folders', [])
     readme_gen = ReadmeGenerator(project_info)
     readme_path = os.path.join(req.project_path, 'README.md')
-    readme_gen.generate(output_path=readme_path)
+    # Only generate README if it doesn't already exist
+    if not os.path.exists(readme_path):
+        readme_gen.generate(output_path=readme_path)
+    else:
+        # Re-generate only if it looks like our old 6-line stub
+        with open(readme_path, 'r', encoding='utf-8', errors='ignore') as _f:
+            _old = _f.read()
+        if len(_old.strip().splitlines()) < 20:
+            readme_gen.generate(output_path=readme_path)
 
     # Auto-generate requirements.txt if missing
     _generate_requirements(req.project_path)
