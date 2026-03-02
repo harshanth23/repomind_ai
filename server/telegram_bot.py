@@ -188,14 +188,15 @@ async def _do_analyze(edit_fn, path: str, bot_data: dict = None):
     except Exception as e:
         await edit_fn(f"❌ Error: {e}")
 
-async def _do_push(edit_fn, path: str, repo_name: str = None, use_existing: bool = False):
+async def _do_push(edit_fn, path: str, repo_name: str = None, use_existing: bool = False, exclude_paths: list = None):
     if not repo_name:
         repo_name = os.path.basename(path).replace(' ', '-').lower()
     try:
         result = call_api('POST', '/push', {
             'project_path': path, 'repo_name': repo_name,
             'commit_message': 'Commit via RepoMind AI',
-            'use_existing': use_existing
+            'use_existing': use_existing,
+            'dataset_links': {p: '' for p in (exclude_paths or [])}
         })
         url = result.get('url', '')
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Open on GitHub", url=url)], [HOME_BTN]])
@@ -240,6 +241,44 @@ async def _do_structure(edit_fn, path: str, bot_data: dict = None):
         kb = InlineKeyboardMarkup(rows)
 
     await edit_fn("\n".join(lines), parse_mode='Markdown', reply_markup=kb)
+
+# ─── Exclusion Picker Helper ─────────────────────────────────────────────────
+
+def _build_excl_keyboard(bot_data: dict, user_data: dict):
+    state = user_data.get('push_excl', {})
+    path = state.get('path', '')
+    repo_name = state.get('repo_name', '')
+    pidx = state.get('pidx', 0)
+    excluded: set = set(state.get('excluded', []))
+
+    # Gather all direct subfolders to show
+    try:
+        subfolders = sorted([os.path.join(path, n) for n in os.listdir(path)
+            if os.path.isdir(os.path.join(path, n)) and not n.startswith('.') and not n.startswith('$')])
+    except Exception:
+        subfolders = []
+
+    buttons = []
+    for fp in subfolders[:15]:
+        name = os.path.basename(fp)
+        fidx = _register_path(bot_data, fp)
+        icon = "🚫" if fp in excluded else "✅"
+        buttons.append([InlineKeyboardButton(f"{icon} {name}", callback_data=f"excltoggle:{fidx}")])
+
+    excl_names = [os.path.basename(p) for p in excluded]
+    excl_str = ', '.join(excl_names) if excl_names else 'None'
+    n_excl = len(excluded)
+    label = f"🚀 Push Now — {n_excl} folder(s) excluded" if n_excl else "🚀 Push Now — all folders included"
+    buttons.append([InlineKeyboardButton(label, callback_data="pushgo")])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data=f"act:push:{pidx}"), HOME_BTN])
+
+    text = (
+        f"📦 *Choose folders to EXCLUDE from push:*\n\n"
+        f"📁 `{_esc(os.path.basename(path))}`  →  *{_esc(repo_name)}*\n\n"
+        f"✅ = will be pushed\n❌⃣ = excluded (tap to toggle)\n\n"
+        f"*Excluded:* {_esc(excl_str)}"
+    )
+    return text, InlineKeyboardMarkup(buttons)
 
 # ─── Drive Browser ────────────────────────────────────────────────────────────
 async def _show_drives(reply_fn, bot_data: dict):
@@ -505,11 +544,47 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("pushconfirm:"):
         parts = data.split(":", 3)
-        path = _get_path(context.bot_data, int(parts[1]))
+        pidx = int(parts[1])
+        path = _get_path(context.bot_data, pidx)
         repo_name = parts[2]
         use_existing = len(parts) > 3 and parts[3] == 'exist'
-        await query.edit_message_text(f"🚀 Pushing to *{_esc(repo_name)}*...", parse_mode='Markdown')
-        await _do_push(query.edit_message_text, path, repo_name, use_existing=use_existing)
+        # Store push state and route to exclusion picker
+        context.user_data['push_excl'] = {
+            'path': path, 'repo_name': repo_name,
+            'use_existing': use_existing, 'pidx': pidx, 'excluded': []
+        }
+        text, kb = _build_excl_keyboard(context.bot_data, context.user_data)
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+
+    elif data.startswith("excltoggle:"):
+        fidx = int(data.split(":")[1])
+        fp = _get_path(context.bot_data, fidx)
+        state = context.user_data.get('push_excl', {})
+        excluded: list = state.get('excluded', [])
+        if fp in excluded:
+            excluded.remove(fp)
+        else:
+            excluded.append(fp)
+        state['excluded'] = excluded
+        context.user_data['push_excl'] = state
+        text, kb = _build_excl_keyboard(context.bot_data, context.user_data)
+        await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
+
+    elif data == "pushgo":
+        state = context.user_data.get('push_excl', {})
+        path = state.get('path', '')
+        repo_name = state.get('repo_name', '')
+        use_existing = state.get('use_existing', False)
+        excluded = state.get('excluded', [])
+        context.user_data.pop('push_excl', None)
+        n = len(excluded)
+        await query.edit_message_text(
+            f"🚀 Pushing *{_esc(repo_name)}*"
+            + (f" (excluding {n} folder{'s' if n!=1 else ''})" if n else "") + "...",
+            parse_mode='Markdown'
+        )
+        await _do_push(query.edit_message_text, path, repo_name,
+                       use_existing=use_existing, exclude_paths=excluded if excluded else None)
 
 # ─── Natural Language Handler ─────────────────────────────────────────────────
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -535,7 +610,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [HOME_BTN],
         ])
         await update.message.reply_text(
-            f"🚀 *Create New Repo*\n\n📁 `{_esc(path)}`\nRepo: *{_esc(repo_name)}*\n\nA new public repo will be created on GitHub.",
+            f"🚀 *Create New Repo*\n\n📁 `{_esc(path)}`\nRepo: *{_esc(repo_name)}*\n\nTap Confirm to choose what to exclude before pushing.",
             parse_mode='Markdown', reply_markup=kb
         )
         return
