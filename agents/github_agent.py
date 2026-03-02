@@ -38,6 +38,11 @@ class GitHubAgent:
         response.raise_for_status()
         return response.json()
 
+    def update_repo(self, repo_name: str, description: str) -> None:
+        """PATCH the repo's description on GitHub."""
+        url = f"{self.API_BASE}/repos/{self.username}/{repo_name}"
+        requests.patch(url, json={'description': description}, headers=self.headers)
+
     def delete_repo(self, repo_name: str) -> bool:
         url = f"{self.API_BASE}/repos/{self.username}/{repo_name}"
         response = requests.delete(url, headers=self.headers)

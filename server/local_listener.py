@@ -1,9 +1,13 @@
 import ast
+import logging
 import os
 import subprocess
 import sys
+import traceback
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
+
+logging.basicConfig(level=logging.INFO)
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -16,6 +20,7 @@ from agents.decision import DecisionLayer
 from agents.readme_generator import ReadmeGenerator
 from agents.github_agent import GitHubAgent
 from database.db import DatabaseManager
+from utils.llm import generate_short_description
 
 app = FastAPI(title="RepoMind AI Local Server")
 db = DatabaseManager()
@@ -149,6 +154,16 @@ def analyze(req: AnalyzeRequest):
 
 @app.post('/push')
 def push(req: PushRequest):
+    try:
+        return _push_impl(req)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error("PUSH 500 EXCEPTION:\n" + traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _push_impl(req: PushRequest):
     token = os.getenv('GITHUB_TOKEN')
     username = os.getenv('GITHUB_USERNAME')
     if not token or not username:
@@ -156,24 +171,73 @@ def push(req: PushRequest):
 
     agent = GitHubAgent(token=token, username=username)
 
+    # Quick scan+analyze to feed real data into README and description
+    try:
+        _scanner  = ProjectScanner(req.project_path)
+        _scan     = _scanner.scan()
+        _analyzer = ProjectAnalyzer(req.project_path)
+        _analysis = _analyzer.analyze()
+    except Exception:
+        _scan = {}
+        _analysis = {}
+
+    # Auto-generate a meaningful GitHub repo description via Groq
+    _frameworks = _analysis.get('detected_frameworks', [])
+    _loc        = _analysis.get('total_lines_of_code', 0)
+    _model_files = _analysis.get('model_files', [])
+    _folders = []
+    try:
+        _folders = sorted([
+            d for d in os.listdir(req.project_path)
+            if os.path.isdir(os.path.join(req.project_path, d)) and not d.startswith('.')
+        ])
+    except Exception:
+        pass
+    auto_desc = req.description
+    if not auto_desc:
+        try:
+            auto_desc = generate_short_description(
+                req.repo_name, _frameworks, _folders, _loc, _model_files
+            )
+        except Exception:
+            auto_desc = ''
+
     # Create or verify GitHub repo
     if not req.use_existing:
         try:
-            agent.create_repo(req.repo_name, description=req.description, private=req.private)
+            agent.create_repo(req.repo_name, description=auto_desc, private=req.private)
         except Exception as e:
             err = str(e)
             if "already exists" in err.lower() or "422" in err:
-                pass  # Repo exists, that's fine
+                # Repo already exists — update the description
+                try:
+                    agent.update_repo(req.repo_name, auto_desc)
+                except Exception:
+                    pass
             else:
                 raise HTTPException(status_code=500, detail=err)
     else:
         if not agent.repo_exists(req.repo_name):
             raise HTTPException(status_code=404, detail=f"Repo '{req.repo_name}' not found on GitHub")
+        # Update description on existing repo too
+        try:
+            agent.update_repo(req.repo_name, auto_desc)
+        except Exception:
+            pass
 
-    # Generate README
+    # Generate README with all real project data
     project_info = req.project_info or {}
-    project_info['project_name'] = project_info.get('project_name', req.repo_name)
-    project_info['dataset_links'] = req.dataset_links
+    project_info['project_name']        = project_info.get('project_name', req.repo_name)
+    project_info['project_path']        = req.project_path
+    project_info['dataset_links']       = req.dataset_links
+    project_info['description']         = auto_desc
+    project_info['detected_frameworks'] = _frameworks
+    project_info['total_python_files']  = _analysis.get('total_python_files', 0)
+    project_info['total_lines_of_code'] = _loc
+    project_info['model_files']         = _model_files
+    project_info['total_files']         = _scan.get('total_files', 0)
+    project_info['total_size_hr']       = _scan.get('total_size_hr', '')
+    project_info['dataset_folders']     = _scan.get('dataset_folders', [])
     readme_gen = ReadmeGenerator(project_info)
     readme_path = os.path.join(req.project_path, 'README.md')
     readme_gen.generate(output_path=readme_path)
