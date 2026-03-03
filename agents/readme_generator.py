@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 
 try:
-    from utils.llm import generate_project_description
+    from utils.llm import generate_full_readme
     LLM_AVAILABLE = True
 except Exception:
     LLM_AVAILABLE = False
@@ -16,65 +16,72 @@ class ReadmeGenerator:
     def generate(self, output_path: str = None) -> str:
         info = self.project_info
         name = info.get('project_name', 'My Project')
-        description = info.get('description', '')
-        if not description and self.use_llm:
-            try:
-                description = generate_project_description(
-                    project_name=name,
-                    frameworks=info.get('detected_frameworks', []),
-                    file_count=info.get('total_python_files', 0),
-                    loc=info.get('total_lines_of_code', 0)
-                )
-            except Exception:
-                description = 'No description provided.'
-        if not description:
-            description = 'No description provided.'
-        features = info.get('features', [])
-        install_steps = info.get('installation_steps', ['pip install -r requirements.txt'])
-        usage = info.get('usage_example', 'python main.py')
-        dataset_links = info.get('dataset_links', {})
-        results = info.get('results', 'No results documented yet.')
-        license_type = info.get('license', 'MIT')
-        frameworks = info.get('detected_frameworks', [])
         year = datetime.now().year
 
-        lines = []
-        lines.append(f"# {name}\n")
-        lines.append(f"{description}\n")
-        if frameworks:
-            lines.append(f"**Frameworks:** {', '.join(frameworks)}\n")
-        lines.append("## Features\n")
-        if features:
-            for feat in features:
-                lines.append(f"- {feat}")
-        else:
-            lines.append("- Feature 1")
-            lines.append("- Feature 2")
-        lines.append("")
-        lines.append("## Installation\n")
-        lines.append("```bash")
-        for step in install_steps:
-            lines.append(step)
-        lines.append("```\n")
-        lines.append("## Usage\n")
-        lines.append("```bash")
-        lines.append(usage)
-        lines.append("```\n")
-        if dataset_links:
-            lines.append("## Dataset\n")
-            lines.append("The dataset is not included in this repository due to its size.")
-            lines.append("Download it from:\n")
-            for ds_path, link in dataset_links.items():
-                folder_name = os.path.basename(ds_path)
-                lines.append(f"- [{folder_name}]({link})")
-            lines.append("")
-            lines.append("Place the data in the `data/` directory.\n")
-        lines.append("## Results\n")
-        lines.append(f"{results}\n")
-        lines.append("## License\n")
-        lines.append(f"This project is licensed under the {license_type} License. (c) {year}\n")
+        readme_content = None
 
-        readme_content = "\n".join(lines)
+        # --- LLM path: generate the entire README ---
+        if self.use_llm:
+            try:
+                # Build top-level folder list from scan data if available
+                root_path = info.get('project_path', '')
+                folder_structure = []
+                if root_path and os.path.isdir(root_path):
+                    try:
+                        folder_structure = sorted([
+                            d for d in os.listdir(root_path)
+                            if os.path.isdir(os.path.join(root_path, d))
+                            and not d.startswith('.')
+                            and d not in ('__pycache__', '.git', 'venv', '.venv', 'env', 'node_modules')
+                        ])
+                    except Exception:
+                        folder_structure = []
+
+                project_data = {
+                    'project_name':        name,
+                    'description':         info.get('description', ''),
+                    'frameworks':          info.get('detected_frameworks', []),
+                    'total_python_files':  info.get('total_python_files', 0),
+                    'total_lines_of_code': info.get('total_lines_of_code', 0),
+                    'total_files':         info.get('total_files', 0),
+                    'total_size_hr':       info.get('total_size_hr', ''),
+                    'dataset_folders':     info.get('dataset_folders', []),
+                    'model_files':         info.get('model_files', []),
+                    'folder_structure':    folder_structure,
+                    'dataset_links':       info.get('dataset_links', {}),
+                }
+                readme_content = generate_full_readme(project_data)
+            except Exception:
+                readme_content = None
+
+        # --- Fallback: build a decent template if LLM unavailable or failed ---
+        if not readme_content:
+            frameworks   = info.get('detected_frameworks', [])
+            dataset_links = info.get('dataset_links', {})
+            lines = []
+            lines.append(f"# {name}\n")
+            lines.append(f"> Auto-generated README for **{name}**\n")
+            if frameworks:
+                lines.append(f"**Frameworks:** {', '.join(frameworks)}\n")
+            lines.append("## Installation\n")
+            lines.append("```bash")
+            lines.append(f"git clone https://github.com/<your-username>/{name}.git")
+            lines.append(f"cd {name}")
+            lines.append("pip install -r requirements.txt")
+            lines.append("```\n")
+            lines.append("## Usage\n")
+            lines.append("```bash")
+            lines.append("python main.py")
+            lines.append("```\n")
+            if dataset_links:
+                lines.append("## Dataset\n")
+                for ds_path, link in dataset_links.items():
+                    lines.append(f"- [{os.path.basename(ds_path)}]({link})")
+                lines.append("")
+            lines.append("## License\n")
+            lines.append(f"MIT License © {year}\n")
+            readme_content = "\n".join(lines)
+
         if output_path:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(readme_content)
