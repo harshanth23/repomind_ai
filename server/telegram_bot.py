@@ -2,7 +2,6 @@ import asyncio
 import os
 import sys
 import re
-import string
 import requests
 from functools import partial
 from dotenv import load_dotenv
@@ -21,6 +20,17 @@ from database.db import DatabaseManager
 
 SERVER_URL = f"http://localhost:{os.getenv('SERVER_PORT', 8000)}"
 db = DatabaseManager()
+ALLOWED_ROOT = os.path.normcase(os.path.normpath('D:\\'))
+
+
+def _is_allowed_path(path: str) -> bool:
+    if not path:
+        return False
+    try:
+        normalized = os.path.normcase(os.path.normpath(path))
+        return normalized.startswith(ALLOWED_ROOT)
+    except Exception:
+        return False
 
 # ─── Path Registry ────────────────────────────────────────────────────────────
 # Telegram callback_data max = 64 bytes, so we store paths in bot_data by index
@@ -103,7 +113,10 @@ def _detect_drive(text: str) -> str | None:
     for pat in patterns:
         m = re.search(pat, t)
         if m:
-            return m.group(1).upper() + ':\\'
+            drive = m.group(1).upper() + ':\\'
+            if drive.upper() == 'D:\\':
+                return drive
+            return None
     return None
 
 def _build_nav_keyboard(bot_data: dict, path: str, subfolders: list, page: int = 0):
@@ -306,7 +319,10 @@ def _build_excl_keyboard(bot_data: dict, user_data: dict, mode: str = 'push'):
 
 # ─── Drive Browser ────────────────────────────────────────────────────────────
 async def _show_drives(reply_fn, bot_data: dict):
-    drives = [f"{l}:\\" for l in string.ascii_uppercase if os.path.exists(f"{l}:\\")]
+    drives = ['D:\\'] if os.path.exists('D:\\') else []
+    if not drives:
+        await reply_fn("❌ *Drive D:* not found.", parse_mode='Markdown')
+        return
     buttons = [[InlineKeyboardButton(f"💾 Drive {d[0]}:", callback_data=f"nav:{_register_path(bot_data, d)}")] for d in drives]
     await reply_fn("💾 *Available Drives:*\n\nSelect a drive to browse:",
                    parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
@@ -362,15 +378,23 @@ async def analyze_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /analyze <project_path>")
         return
+    project_path = ' '.join(context.args)
+    if not _is_allowed_path(project_path):
+        await update.message.reply_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+        return
     msg = await update.message.reply_text(f"🔍 Analyzing...", parse_mode='Markdown')
-    await _do_analyze(msg.edit_text, ' '.join(context.args), context.bot_data)
+    await _do_analyze(msg.edit_text, project_path, context.bot_data)
 
 async def push_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text("Usage: /push <project_path> <repo_name>")
         return
+    project_path = ' '.join(context.args[:-1])
+    if not _is_allowed_path(project_path):
+        await update.message.reply_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+        return
     msg = await update.message.reply_text("🚀 Pushing...")
-    await _do_push(msg.edit_text, ' '.join(context.args[:-1]), context.args[-1])
+    await _do_push(msg.edit_text, project_path, context.args[-1])
 
 async def repos_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_fn = update.message.reply_text if update.message else update.callback_query.edit_message_text
@@ -463,6 +487,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("nav:"):
         idx = int(data.split(":")[1])
         path = _get_path(context.bot_data, idx)
+        if not _is_allowed_path(path):
+            await query.edit_message_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+            return
         if not path or not os.path.isdir(path):
             await query.edit_message_text(f"❌ Path not found: `{path}`", parse_mode='Markdown')
             return
@@ -476,18 +503,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("navp:"):
         _, idx_s, page_s = data.split(":")
         path = _get_path(context.bot_data, int(idx_s))
+        if not _is_allowed_path(path):
+            await query.edit_message_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+            return
         text, kb = _build_nav_keyboard(context.bot_data, path, _get_subfolders(path), page=int(page_s))
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
 
     elif data.startswith("select:"):
         idx = int(data.split(":")[1])
         path = _get_path(context.bot_data, idx)
+        if not _is_allowed_path(path):
+            await query.edit_message_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+            return
         text, kb = _build_action_keyboard(context.bot_data, path)
         await query.edit_message_text(text, parse_mode='Markdown', reply_markup=kb)
 
     elif data.startswith("act:"):
         _, action, idx_s = data.split(":", 2)
         path = _get_path(context.bot_data, int(idx_s))
+        if not _is_allowed_path(path):
+            await query.edit_message_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+            return
         pidx = int(idx_s)
 
         if action == "analyze":
@@ -570,6 +606,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = data.split(":", 3)
         pidx = int(parts[1])
         path = _get_path(context.bot_data, pidx)
+        if not _is_allowed_path(path):
+            await query.edit_message_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+            return
         repo_name = parts[2]
         use_existing = len(parts) > 3 and parts[3] == 'exist'
         # Store push state and route to exclusion picker
@@ -611,6 +650,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "analyzego":
         state = context.user_data.pop('analyze_excl', {})
         path = state.get('path', '')
+        if not _is_allowed_path(path):
+            await query.edit_message_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+            return
         excluded = state.get('excluded', [])
         n = len(excluded)
         await query.edit_message_text(
@@ -623,6 +665,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "pushgo":
         state = context.user_data.get('push_excl', {})
         path = state.get('path', '')
+        if not _is_allowed_path(path):
+            await query.edit_message_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+            return
         repo_name = state.get('repo_name', '')
         use_existing = state.get('use_existing', False)
         excluded = state.get('excluded', [])
@@ -679,6 +724,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❌ Drive `{drive}` not found.", parse_mode='Markdown')
         return
+    if re.search(r'\b(?:[a-ce-zA-CE-Z]):\\', text):
+        await update.message.reply_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+        return
 
     thinking = await update.message.reply_text("🤔 Processing...")
     projects = db.get_all_projects()
@@ -690,11 +738,17 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         params = intent.get('params', {})
 
         if action == 'analyze' and params.get('project_path'):
+            if not _is_allowed_path(params['project_path']):
+                await thinking.edit_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+                return
             await thinking.edit_text(f"🔍 Analyzing...", parse_mode='Markdown')
             await _do_analyze(thinking.edit_text, params['project_path'], context.bot_data)
             return
         elif action == 'push' and params.get('project_path'):
             path = params['project_path']
+            if not _is_allowed_path(path):
+                await thinking.edit_text("❌ Only `D:\\` is allowed.", parse_mode='Markdown')
+                return
             repo = params.get('repo_name', os.path.basename(path).replace(' ', '-').lower())
             await thinking.edit_text(f"🚀 Pushing...")
             await _do_push(thinking.edit_text, path, repo)

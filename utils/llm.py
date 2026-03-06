@@ -50,6 +50,7 @@ def interpret_command(user_message: str, project_names: list) -> dict:
         "  'action': one of [analyze, push, list_repos, list_projects, help, unknown]\n"
         "  'params': dict with keys like 'project_path', 'repo_name'\n\n"
         "IMPORTANT path rules for Windows:\n"
+        "- Only drive D is allowed; never return paths on C or any other drive.\n"
         "- 'drive D' or 'D drive' means 'D:\\'\n"
         "- Convert natural language folder descriptions to Windows absolute paths.\n"
         "- Example: 'drive D class work openlab drowsiness detection' → 'D:\\Class Work\\openlab\\drowsiness detection'\n"

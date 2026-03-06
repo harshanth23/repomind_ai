@@ -24,6 +24,17 @@ from utils.llm import generate_short_description
 
 app = FastAPI(title="RepoMind AI Local Server")
 db = DatabaseManager()
+ALLOWED_ROOT = os.path.normcase(os.path.normpath('D:\\'))
+
+
+def _is_allowed_path(path: str) -> bool:
+    if not path:
+        return False
+    try:
+        normalized = os.path.normcase(os.path.normpath(path))
+        return normalized.startswith(ALLOWED_ROOT)
+    except Exception:
+        return False
 
 
 # --- Helpers ---
@@ -120,6 +131,8 @@ class DatasetLinkRequest(BaseModel):
 # --- Endpoints ---
 @app.post('/analyze')
 def analyze(req: AnalyzeRequest):
+    if not _is_allowed_path(req.project_path):
+        raise HTTPException(status_code=400, detail="Only D:\\ paths are allowed")
     if not os.path.isdir(req.project_path):
         raise HTTPException(status_code=400, detail=f"Path not found: {req.project_path}")
 
@@ -164,6 +177,8 @@ def push(req: PushRequest):
 
 
 def _push_impl(req: PushRequest):
+    if not _is_allowed_path(req.project_path):
+        raise HTTPException(status_code=400, detail="Only D:\\ paths are allowed")
     token = os.getenv('GITHUB_TOKEN')
     username = os.getenv('GITHUB_USERNAME')
     if not token or not username:
