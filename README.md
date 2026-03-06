@@ -230,8 +230,4 @@ When pushing:
 - Depends on external services (Groq + GitHub APIs).
 - Error handling in some flows is intentionally minimal for speed.
 
----
 
-## License
-
-MIT (recommended). Add a `LICENSE` file if you want an explicit license declaration.
